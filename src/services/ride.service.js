@@ -1,4 +1,4 @@
-const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const config=require('../config/env'); const {sendPush}=require('../config/firebase');
+const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const config=require('../config/env'); const {sendPush}=require('../config/firebase'); const finance=require('./driver_finance.service');
 function haversine(a,b,c,d){const R=6371,rad=Math.PI/180;const dLat=(c-a)*rad,dLon=(d-b)*rad;const x=Math.sin(dLat/2)**2+Math.cos(a*rad)*Math.cos(c*rad)*Math.sin(dLon/2)**2;return 2*R*Math.asin(Math.sqrt(x));}
 function fare({rideType,distanceKm,durationMin}){const multiplier=rideType==='boda'?1:rideType==='bajaji'?1.15:1.5;return Math.round((config.ride.baseFare+distanceKm*config.ride.perKm+durationMin*config.ride.perMinute+config.ride.bookingFee)*multiplier);}
 function code(prefix='ZG'){return `${prefix}${Date.now().toString(36).toUpperCase().slice(-7)}${Math.floor(Math.random()*1000).toString().padStart(3,'0')}`;}
@@ -8,6 +8,9 @@ async function create(riderId,input){
  const q=await quote(input);
  const tripPin=Math.floor(1000+Math.random()*9000).toString();
  let discount=0;
+ let cancellationFee=0;
+ const debtRow=await db.query('SELECT cancellation_debt FROM rider_profiles WHERE user_id=?',[riderId]);
+ if(debtRow.length) cancellationFee=Math.max(0,Number(debtRow[0].cancellation_debt||0));
  if(input.promoCode){
    const p=await db.query(`SELECT * FROM promos WHERE code=? AND is_active=1 AND valid_from<=UTC_TIMESTAMP() AND valid_until>=UTC_TIMESTAMP() LIMIT 1`,[input.promoCode.toUpperCase()]);
    if(!p.length) throw ApiError.badRequest('Promo code is invalid or expired.');
@@ -17,9 +20,10 @@ async function create(riderId,input){
    if(p[0].max_discount) discount=Math.min(discount,Number(p[0].max_discount));
    discount=Math.min(discount,q.estimatedFare);
  }
- const r=await db.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,payment_method,promo_code,trip_pin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
- [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,input.paymentMethod||'cash',input.promoCode?.toUpperCase()||null,tripPin]);
- await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q})]);
+ const r=await db.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,cancellation_fee,payment_method,promo_code,trip_pin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+ [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,cancellationFee,input.paymentMethod||'cash',input.promoCode?.toUpperCase()||null,tripPin]);
+ await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q,cancellationFee})]);
+ if(cancellationFee>0) await db.query('UPDATE rider_profiles SET cancellation_debt=0 WHERE user_id=?',[riderId]);
  await notifyAvailableDrivers(r.insertId,input.rideType,input.pickupLat,input.pickupLng);
  return getById(r.insertId,riderId);
 }
@@ -36,6 +40,7 @@ async function listForUser(userId,role,limit=30){
  const col=role==='driver'?'r.driver_id':'r.rider_id'; return db.query(`SELECT r.*,du.full_name driver_name,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number FROM rides r LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE ${col}=? ORDER BY r.created_at DESC LIMIT ?`,[userId,Math.min(Number(limit)||30,100)]);
 }
 async function accept(driverId,rideId){
+ await finance.assertUsable(driverId,'accept new rides');
  return db.transaction(async conn=>{
   const [rides]=await conn.query(`SELECT * FROM rides WHERE id=? FOR UPDATE`,[rideId]);
   if(!rides.length) throw ApiError.notFound('Ride not found');
@@ -50,23 +55,26 @@ async function accept(driverId,rideId){
  });
 }
 async function setStatus(driverId,rideId,status){
+ if(status!=='completed' && status!=='cancelled') await finance.assertUsable(driverId,'continue accepting rides');
  const allowed={arriving:['accepted'],arrived:['arriving'],started:['arrived'],completed:['started'],cancelled:['accepted','arriving','arrived']};
- return db.transaction(async conn=>{
-  const [rows]=await conn.query('SELECT * FROM rides WHERE id=? AND driver_id=? FOR UPDATE',[rideId,driverId]); if(!rows.length)throw ApiError.notFound('Ride not found');
-  const r=rows[0]; if(!allowed[status]?.includes(r.status)) throw ApiError.conflict(`Cannot change ride from ${r.status} to ${status}.`);
+ const result=await db.transaction(async conn=>{
+  const [rows]=await conn.query('SELECT * FROM rides WHERE id=? AND driver_id=? FOR UPDATE',[rideId,driverId]);
+  if(!rows.length) throw ApiError.notFound('Ride not found');
+  const r=rows[0];
+  if(!allowed[status]?.includes(r.status)) throw ApiError.conflict(`Cannot change ride from ${r.status} to ${status}.`);
   if(status==='completed' && !r.started_at) throw ApiError.conflict('Ride has not started.');
   let sql='UPDATE rides SET status=?'; const vals=[status];
   if(status==='arriving') sql+=',accepted_at=COALESCE(accepted_at,UTC_TIMESTAMP())';
   if(status==='arrived') sql+=',arrived_at=UTC_TIMESTAMP()';
   if(status==='started') sql+=',started_at=UTC_TIMESTAMP()';
-  if(status==='completed') sql+=',completed_at=UTC_TIMESTAMP(),final_fare=estimated_fare,total_paid=GREATEST(0,estimated_fare-discount+tip)';
-  if(status==='cancelled') sql+=',cancelled_at=UTC_TIMESTAMP(),cancel_reason=?';
-  if(status==='cancelled') vals.push('Cancelled by driver');
-  sql+=' WHERE id=?'; vals.push(rideId); await conn.query(sql,vals);
+  if(status==='completed') sql+=',completed_at=UTC_TIMESTAMP(),final_fare=GREATEST(0,estimated_fare-discount),total_paid=GREATEST(0,estimated_fare-discount+cancellation_fee+tip)';
+  if(status==='cancelled'){sql+=',cancelled_at=UTC_TIMESTAMP(),cancel_reason=?'; vals.push('Cancelled by driver');}
+  sql+=' WHERE id=?'; vals.push(rideId);
+  await conn.query(sql,vals);
   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,driverId,status]);
   const rider=r.rider_id;
   if(status==='completed'){
-    const total=Number(r.estimated_fare)-Number(r.discount)+Number(r.tip);
+    const total=Math.max(0,Number(r.estimated_fare)-Number(r.discount)+Number(r.cancellation_fee||0)+Number(r.tip||0));
     if(r.payment_method==='wallet'){
       const [w]=await conn.query('SELECT balance FROM wallets WHERE user_id=? FOR UPDATE',[rider]);
       if(!w.length || Number(w[0].balance)<total) throw ApiError.badRequest('Rider wallet balance is insufficient.');
@@ -74,17 +82,44 @@ async function setStatus(driverId,rideId,status){
       await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,rider]);
       await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[rider,'ride',-total,before,after,'ride',rideId,'wallet','Ride payment']);
     }
-    await conn.query('UPDATE driver_profiles SET total_rides=total_rides+1,total_earnings=total_earnings+? WHERE user_id=?',[total*(1-config.ride.driverCommission/100),driverId]);
+    await finance.recordRideEarning(conn,driverId,total,rideId);
+    if(Number(r.cancellation_fee||0)>0){
+      await conn.query('UPDATE rider_cancellation_debts SET amount=GREATEST(0,amount-?),updated_at=UTC_TIMESTAMP() WHERE rider_id=?',[Number(r.cancellation_fee),rider]);
+      await conn.query('UPDATE rider_profiles SET cancellation_debt=GREATEST(0,cancellation_debt-?) WHERE user_id=?',[Number(r.cancellation_fee),rider]);
+    }
     await conn.query('UPDATE rider_profiles SET total_rides=total_rides+1 WHERE user_id=?',[rider]);
   }
-  await pushUser(rider, status==='completed'?'Ride completed':`Ride ${status}`,status==='completed'?'Your ride is complete.':`Your driver status is now ${status}.`,{type:'ride_status',rideId});
+  await pushUser(rider,status==='completed'?'Ride completed':`Ride ${status}`,status==='completed'?'Your ride is complete.':`Your driver status is now ${status}.`,{type:'ride_status',rideId});
   return getById(rideId,driverId);
  });
+ if(status==='completed'){
+   const financeStatus=await finance.getStatus(driverId);
+   if(financeStatus.blocked && financeStatus.autopayEnabled) await finance.tryAutopay(driverId);
+ }
+ return result;
 }
 async function cancelRider(riderId,rideId,reason){
- const r=await db.query('SELECT * FROM rides WHERE id=? AND rider_id=?',[rideId,riderId]); if(!r.length)throw ApiError.notFound('Ride not found');
+ const r=await db.query(`SELECT r.*,d.current_lat,d.current_lng FROM rides r LEFT JOIN driver_profiles d ON d.user_id=r.driver_id WHERE r.id=? AND r.rider_id=?`,[rideId,riderId]);
+ if(!r.length)throw ApiError.notFound('Ride not found');
  if(!['searching','accepted','arriving','arrived'].includes(r[0].status))throw ApiError.conflict('This ride cannot be cancelled now.');
- await db.query('UPDATE rides SET status="cancelled",cancel_reason=?,cancelled_at=UTC_TIMESTAMP() WHERE id=?',[reason||'Cancelled by rider',rideId]); await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,riderId,'cancelled']); return getById(rideId,riderId);
+ const x=r[0];
+ let fee=0,near=false;
+ if(x.driver_id && x.current_lat!=null && x.current_lng!=null){
+   const km=finance.haversine(Number(x.current_lat),Number(x.current_lng),Number(x.pickup_lat),Number(x.pickup_lng));
+   near=km<=finance.NEAR_RADIUS || x.status==='arrived';
+   if(near) fee=Math.round(Number(x.estimated_fare)*finance.CANCEL_PERCENT/100);
+ }
+ await db.transaction(async conn=>{
+   await conn.query('UPDATE rides SET status="cancelled",cancel_reason=?,cancellation_fee=?,cancellation_fee_applied=?,cancelled_at=UTC_TIMESTAMP() WHERE id=?',
+     [reason||'Cancelled by rider',fee,fee>0?1:0,rideId]);
+   if(fee>0){
+     await conn.query(`INSERT INTO rider_cancellation_debts(rider_id,amount,last_ride_id) VALUES(?,?,?) ON DUPLICATE KEY UPDATE amount=amount+VALUES(amount),last_ride_id=VALUES(last_ride_id)`,
+       [riderId,fee,rideId]);
+     await conn.query('UPDATE rider_profiles SET cancellation_debt=cancellation_debt+? WHERE user_id=?',[fee,riderId]);
+   }
+   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[rideId,riderId,'cancelled',JSON.stringify({fee,nearPickup:near,percent:finance.CANCEL_PERCENT})]);
+ });
+ return {...await getById(rideId,riderId),cancellationFee:fee,chargedOnNextRide:fee>0};
 }
 async function rate(riderId,rideId,stars,feedback,tip){
  const r=await db.query('SELECT * FROM rides WHERE id=? AND rider_id=? AND status="completed"',[rideId,riderId]); if(!r.length)throw ApiError.notFound('Completed ride not found');

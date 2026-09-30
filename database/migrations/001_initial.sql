@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS otp_verifications (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   target VARCHAR(190) NOT NULL,
   channel ENUM('sms','whatsapp','email') NOT NULL DEFAULT 'sms',
-  purpose ENUM('login','signup','driver_registration','password_reset') NOT NULL,
+  purpose ENUM('login','signup','driver_registration','password_reset','admin_login') NOT NULL,
   provider_sid VARCHAR(100) NULL,
   status ENUM('pending','verified','expired','cancelled') NOT NULL DEFAULT 'pending',
   attempts INT NOT NULL DEFAULT 0,

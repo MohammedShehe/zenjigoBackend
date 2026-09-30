@@ -34,7 +34,7 @@ module.exports = {
     accessExpires: process.env.JWT_ACCESS_EXPIRES || '15m',
     refreshExpires: process.env.JWT_REFRESH_EXPIRES || '30d'
   },
-  corsOrigins: csv(process.env.CORS_ORIGINS, 'http://localhost:3000'),
+  corsOrigins: csv(process.env.CORS_ORIGINS, 'http://localhost:5000,http://127.0.0.1:5000,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5501,http://127.0.0.1:5501'),
   twilio: {
     accountSid: process.env.TWILIO_ACCOUNT_SID,
     authToken: process.env.TWILIO_AUTH_TOKEN,
@@ -60,6 +60,13 @@ module.exports = {
     rateWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
     rateMax: Number(process.env.RATE_LIMIT_MAX || 300)
   },
+  payment: {
+    provider: process.env.PAYMENT_PROVIDER || 'example',
+    baseUrl: process.env.PAYMENT_API_BASE_URL || '',
+    apiKey: process.env.PAYMENT_API_KEY || '',
+    merchantId: process.env.PAYMENT_MERCHANT_ID || '',
+    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET || ''
+  },
   ride: {
     currency: process.env.CURRENCY || 'TZS',
     countryCode: process.env.DEFAULT_COUNTRY_CODE || '+255',
@@ -76,5 +83,5 @@ module.exports = {
     user: process.env.SMTP_USER, password: process.env.SMTP_PASSWORD,
     from: process.env.SMTP_FROM || 'ZenjiGO <no-reply@example.com>'
   },
-  seedAdmin: { email: process.env.SEED_ADMIN_EMAIL, password: process.env.SEED_ADMIN_PASSWORD }
+  seedAdmin: { email: process.env.SEED_ADMIN_EMAIL, password: process.env.SEED_ADMIN_PASSWORD, phone: process.env.SEED_ADMIN_PHONE || '+255700000001' }
 };

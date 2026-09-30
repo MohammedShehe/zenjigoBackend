@@ -28,3 +28,10 @@ exports.paymentCreate=asyncHandler(async(req,res)=>{
 });
 exports.paymentDefault=asyncHandler(async(req,res)=>{const exists=await db.query('SELECT id FROM payment_methods WHERE id=? AND user_id=?',[req.params.id,req.user.sub]);if(!exists.length)throw ApiError.notFound('Payment method not found');await db.query('UPDATE payment_methods SET is_default=(id=?) WHERE user_id=?',[req.params.id,req.user.sub]);ok(res,null,'Default payment method updated');});
 exports.paymentDelete=asyncHandler(async(req,res)=>{await db.query('DELETE FROM payment_methods WHERE id=? AND user_id=?',[req.params.id,req.user.sub]);ok(res,null,'Payment method removed');});
+
+exports.deviceToken=asyncHandler(async(req,res)=>{
+ if(!req.body.token) throw ApiError.badRequest('FCM token is required.');
+ await db.query(`INSERT INTO device_tokens(user_id,token,platform) VALUES(?,?,?) ON DUPLICATE KEY UPDATE user_id=VALUES(user_id),platform=VALUES(platform),updated_at=UTC_TIMESTAMP()`,[req.user.sub,req.body.token,req.body.platform||'unknown']);
+ ok(res,null,'Device registered');
+});
+exports.removeDeviceToken=asyncHandler(async(req,res)=>{if(!req.body.token)throw ApiError.badRequest('FCM token is required.');await db.query('DELETE FROM device_tokens WHERE user_id=? AND token=?',[req.user.sub,req.body.token]);ok(res,null,'Device removed');});

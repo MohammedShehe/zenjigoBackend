@@ -1,4 +1,4 @@
-const db=require('../config/db'); const {hashPassword}=require('../utils/hash'); const ApiError=require('../utils/ApiError'); const {ok}=require('../utils/response'); const asyncHandler=require('../utils/asyncHandler'); const {notifyUser}=require('../services/notification.service');
+const db=require('../config/db'); const config=require('../config/env'); const {hashPassword}=require('../utils/hash'); const ApiError=require('../utils/ApiError'); const {ok}=require('../utils/response'); const asyncHandler=require('../utils/asyncHandler'); const {notifyUser}=require('../services/notification.service');
 exports.dashboard=asyncHandler(async(req,res)=>{const [[users]]=await Promise.all([db.query('SELECT COUNT(*) n FROM users')]);const [[riders]]=await Promise.all([db.query(`SELECT COUNT(*) n FROM users WHERE role='rider'`)]);const [[drivers]]=await Promise.all([db.query(`SELECT COUNT(*) n FROM users WHERE role='driver'`)]);const [[rides]]=await Promise.all([db.query(`SELECT COUNT(*) n FROM rides WHERE DATE(created_at)=UTC_DATE()`)]);const [[pending]]=await Promise.all([db.query(`SELECT COUNT(*) n FROM driver_profiles WHERE application_status IN ('pending','under_review')`)]);ok(res,{users:users.n,riders:riders.n,drivers:drivers.n,todayRides:rides.n,pendingDriverApplications:pending.n});});
 exports.riders=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT u.id,u.full_name fullName,u.phone,u.email,u.status,u.created_at createdAt,COALESCE(w.balance,0) walletBalance,r.total_rides totalRides,r.rating FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN rider_profiles r ON r.user_id=u.id WHERE u.role='rider' ORDER BY u.id DESC LIMIT 500`)));
 exports.drivers=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT u.id,u.full_name fullName,u.phone,u.email,u.status,u.created_at createdAt,d.driver_code driverCode,d.application_status applicationStatus,d.online,d.rating,d.total_rides totalRides,d.total_earnings totalEarnings,v.type vehicleType,v.plate_number plateNumber FROM users u JOIN driver_profiles d ON d.user_id=u.id LEFT JOIN vehicles v ON v.driver_id=u.id AND v.status='active' WHERE u.role='driver' ORDER BY u.id DESC LIMIT 500`)));
@@ -17,3 +17,51 @@ exports.sendNotification=asyncHandler(async(req,res)=>{const users=req.body.user
 exports.tours=asyncHandler(async(req,res)=>ok(res,await db.query('SELECT * FROM tour_packages ORDER BY id DESC')));
 exports.createTour=asyncHandler(async(req,res)=>{const b=req.body;const r=await db.query('INSERT INTO tour_packages(name,description,duration_hours,base_price,max_tourists,pickup_notes,image_url,created_by) VALUES(?,?,?,?,?,?,?,?)',[b.name,b.description||null,b.durationHours||8,b.basePrice,b.maxTourists||4,b.pickupNotes||null,b.imageUrl||null,req.user.sub]);ok(res,{id:r.insertId},'Tour package created',201);});
 exports.audit=asyncHandler(async(req,res)=>ok(res,await db.query('SELECT * FROM admin_audit_logs ORDER BY id DESC LIMIT 500')));
+
+exports.settings=asyncHandler(async(req,res)=>ok(res,await db.query('SELECT setting_key,setting_value,updated_at FROM app_settings ORDER BY setting_key')));
+exports.updateSetting=asyncHandler(async(req,res)=>{
+ const key=req.params.key; const value=req.body.value;
+ await db.query(`INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,[key,JSON.stringify(value),req.user.sub]);
+ await db.query('INSERT INTO admin_audit_logs(admin_id,action,entity_type,details,ip_address) VALUES(?,?,?,?,?)',[req.user.sub,'setting_update','setting',JSON.stringify({key,value}),req.ip]);
+ ok(res,{key,value},'Setting updated');
+});
+exports.driverFinance=asyncHandler(async(req,res)=>{
+ const rows=await db.query(`SELECT u.id,u.full_name fullName,u.phone,f.gross_since_settlement grossSinceSettlement,f.commission_owed commissionOwed,f.lifetime_gross lifetimeGross,f.lifetime_commission lifetimeCommission,f.blocked,f.autopay_enabled autopayEnabled,f.autopay_provider autopayProvider,d.total_earnings totalEarnings FROM driver_financials f JOIN users u ON u.id=f.driver_id JOIN driver_profiles d ON d.user_id=f.driver_id ORDER BY f.commission_owed DESC`);
+ ok(res,rows);
+});
+exports.settleDriver=asyncHandler(async(req,res)=>{
+ const finance=require('../services/driver_finance.service');
+ const result=await finance.createSettlement(req.params.id,'admin_manual',{adminId:req.user.sub});
+ if(result.status==='already_settled') return ok(res,result,'Driver already settled');
+ const paid=await finance.markPaid(req.params.id,result.id,req.body.externalReference||`ADMIN-${result.id}`);
+ ok(res,paid,'Driver settlement recorded');
+});
+exports.riderStatus=asyncHandler(async(req,res)=>{
+ const status=req.body.status;
+ if(!['active','suspended','rejected'].includes(status)) throw ApiError.badRequest('Invalid rider status');
+ await db.query('UPDATE users SET status=? WHERE id=? AND role="rider"',[status,req.params.id]);
+ ok(res,null,'Rider status updated');
+});
+exports.createRider=asyncHandler(async(req,res)=>{
+ const b=req.body;if(!b.fullName||!b.phone)throw ApiError.badRequest('fullName and phone are required');
+ const r=await db.transaction(async conn=>{
+  const [u]=await conn.query('INSERT INTO users(role,full_name,phone,email,island,region,district,ward,status) VALUES("rider",?,?,?,?,?,?,?,?)',[b.fullName,b.phone,b.email||null,b.island||null,b.region||null,b.district||null,b.ward||null,b.status||'active']);
+  await conn.query('INSERT INTO rider_profiles(user_id,referral_code) VALUES(?,?)',[u.insertId,`ZG${String(u.insertId).padStart(6,'0')}`]);
+  await conn.query('INSERT INTO wallets(user_id) VALUES(?)',[u.insertId]);
+  return u.insertId;
+ });
+ ok(res,{id:r},'Rider created',201);
+});
+
+exports.commissions=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT e.id,e.driver_id driverId,u.full_name driverName,e.ride_id rideId,e.gross_amount grossAmount,e.commission_rate commissionRate,e.commission_amount commissionAmount,e.driver_amount driverAmount,e.created_at createdAt FROM driver_earning_ledger e JOIN users u ON u.id=e.driver_id ORDER BY e.id DESC LIMIT 1000`)));
+exports.commissionSettings=asyncHandler(async(req,res)=>ok(res,{cycleLimit:Number(process.env.DRIVER_SETTLEMENT_THRESHOLD_TZS||60000),percent:Number(process.env.DRIVER_COMMISSION_PERCENT||20),currency:config.ride.currency}));
+exports.updateCommissionSettings=asyncHandler(async(req,res)=>{
+ const cycle=Number(req.body.cycleLimit),percent=Number(req.body.percent);
+ if(!Number.isFinite(cycle)||cycle<=0||!Number.isFinite(percent)||percent<0||percent>100) throw ApiError.badRequest('Invalid commission settings.');
+ await db.query(`INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,['driver_commission_cycle',JSON.stringify(cycle),req.user.sub]);
+ await db.query(`INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,['driver_commission_percent',JSON.stringify(percent),req.user.sub]);
+ ok(res,{cycleLimit:cycle,percent},'Commission settings saved');
+});
+exports.parcels=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT p.*,ru.full_name riderName,du.full_name driverName FROM parcels p JOIN users ru ON ru.id=p.rider_id LEFT JOIN users du ON du.id=p.driver_id ORDER BY p.id DESC LIMIT 1000`)));
+exports.notifications=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT n.*,u.full_name userName FROM notifications n LEFT JOIN users u ON u.id=n.user_id ORDER BY n.id DESC LIMIT 500`)));
+exports.conversations=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT c.*,COUNT(cm.id) messageCount FROM conversations c LEFT JOIN messages cm ON cm.conversation_id=c.id GROUP BY c.id ORDER BY c.updated_at DESC LIMIT 500`)));

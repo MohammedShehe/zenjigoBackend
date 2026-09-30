@@ -1,8 +1,23 @@
-const router=require('express').Router(); const c=require('../controllers/admin.controller'); const {body}=require('express-validator'); const {validate}=require('../utils/validation');
-router.get('/dashboard',c.dashboard); router.get('/riders',c.riders); router.get('/drivers',c.drivers); router.get('/drivers/:id',c.driver); router.patch('/drivers/:id/status',[body('status').isIn(['under_review','approved','active','rejected'])],validate,c.driverStatus); router.patch('/documents/:id/status',[body('status').isIn(['approved','rejected','pending'])],validate,c.documentStatus);
+const router=require('express').Router();
+const c=require('../controllers/admin.controller');
+const {body}=require('express-validator');
+const {validate}=require('../utils/validation');
+
+router.get('/dashboard',c.dashboard);
+router.get('/riders',c.riders); router.post('/riders',c.createRider); router.patch('/riders/:id/status',c.riderStatus);
+router.get('/drivers',c.drivers); router.get('/drivers/:id',c.driver);
+router.patch('/drivers/:id/status',[body('status').isIn(['under_review','approved','active','rejected'])],validate,c.driverStatus);
+router.patch('/documents/:id/status',[body('status').isIn(['approved','rejected','pending'])],validate,c.documentStatus);
+router.get('/driver-finance',c.driverFinance); router.post('/drivers/:id/settle',c.settleDriver);
+router.get('/commissions',c.commissions); router.get('/commission-settings',c.commissionSettings); router.patch('/commission-settings',c.updateCommissionSettings);
 router.get('/rides',c.rides); router.get('/rides/:id',c.ride);
+router.get('/parcels',c.parcels);
 router.get('/promos',c.promos); router.post('/promos',c.createPromo);
 router.get('/payments',c.payments); router.post('/payments/:id/complete',c.completePayment);
 router.get('/payouts',c.payouts); router.patch('/payouts/:id/status',[body('status').isIn(['approved','paid','rejected'])],validate,c.payoutStatus);
-router.post('/notifications',c.sendNotification); router.get('/tour-packages',c.tours); router.post('/tour-packages',c.createTour); router.get('/audit-logs',c.audit);
+router.get('/notifications',c.notifications); router.post('/notifications',c.sendNotification);
+router.get('/conversations',c.conversations);
+router.get('/tour-packages',c.tours); router.post('/tour-packages',c.createTour);
+router.get('/audit-logs',c.audit);
+router.get('/settings',c.settings); router.patch('/settings/:key',c.updateSetting);
 module.exports=router;
