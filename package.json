@@ -1,0 +1,37 @@
+{
+  "name": "zenjigo-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready ZenjiGO backend for Rider, Driver and Admin applications.",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "migrate": "node src/utils/migrate.js",
+    "seed": "node src/utils/seed.js",
+    "check": "node --check src/server.js"
+  },
+  "engines": { "node": ">=20.0.0" },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cloudinary": "^1.41.3",
+    "compression": "^1.8.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "express-validator": "^7.2.1",
+    "firebase-admin": "^13.5.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "mysql2": "^3.15.3",
+    "node-cron": "^4.2.1",
+    "socket.io": "^4.8.1",
+    "twilio": "^5.10.3",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": { "nodemon": "^3.1.10" }
+}

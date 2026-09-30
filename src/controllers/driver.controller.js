@@ -1,0 +1,12 @@
+const s=require('../services/driver.service'); const ride=require('../services/ride.service'); const {ok}=require('../utils/response'); const asyncHandler=require('../utils/asyncHandler'); const db=require('../config/db');
+exports.register=asyncHandler(async(req,res)=>ok(res,await s.register(req.body,req.files),'Application submitted',201));
+exports.profile=asyncHandler(async(req,res)=>ok(res,await s.profile(req.user.sub)));
+exports.documents=asyncHandler(async(req,res)=>ok(res,await s.documents(req.user.sub)));
+exports.online=asyncHandler(async(req,res)=>ok(res,await s.setOnline(req.user.sub,req.body.online),'Availability updated'));
+exports.location=asyncHandler(async(req,res)=>ok(res,await s.location(req.user.sub,req.body)));
+exports.earnings=asyncHandler(async(req,res)=>ok(res,await s.earnings(req.user.sub,req.query.from,req.query.to)));
+exports.payout=asyncHandler(async(req,res)=>ok(res,await s.payout(req.user.sub,req.body),'Payout requested',201));
+exports.requests=asyncHandler(async(req,res)=>ok(res,await db.query(`SELECT r.id,r.ride_code,r.ride_type,r.pickup_address,r.destination_address,r.pickup_lat,r.pickup_lng,r.destination_lat,r.destination_lng,r.estimated_fare,r.estimated_distance_km,r.estimated_duration_min,r.created_at FROM rides r WHERE r.status='searching' AND r.ride_type IN (SELECT type FROM vehicles WHERE driver_id=? AND status='active') ORDER BY r.created_at DESC LIMIT 30`,[req.user.sub])));
+exports.accept=asyncHandler(async(req,res)=>ok(res,await ride.accept(req.user.sub,req.params.id),'Ride accepted'));
+exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status),'Ride status updated'));
+exports.history=asyncHandler(async(req,res)=>ok(res,await ride.listForUser(req.user.sub,'driver',req.query.limit)));

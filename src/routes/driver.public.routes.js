@@ -1,0 +1,3 @@
+const router=require('express').Router(); const c=require('../controllers/driver.controller'); const {upload}=require('../middleware/upload'); const {body}=require('express-validator'); const {validate}=require('../utils/validation');
+router.post('/register',upload.fields([{name:'license',maxCount:1},{name:'nationalId',maxCount:2},{name:'insurance',maxCount:1},{name:'vehiclePhotos',maxCount:5},{name:'driverPhoto',maxCount:1}]),[body('fullName').notEmpty(),body('phone').notEmpty(),body('email').isEmail(),body('nationalId').notEmpty(),body('vehicleType').isIn(['boda','bajaji','taxi']),body('plateNumber').notEmpty(),body('phoneOtpCode').notEmpty()],validate,c.register);
+module.exports=router;

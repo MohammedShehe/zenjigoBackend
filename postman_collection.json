@@ -1,0 +1,159 @@
+{
+  "info": {
+    "name": "ZenjiGO API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api/v1"
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "http://localhost:5000/health"
+      }
+    },
+    {
+      "name": "Rider Send OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"phone\":\"+255700000000\",\"channel\":\"sms\"}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/rider/send-otp",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "rider",
+            "send-otp"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Rider Verify OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"phone\":\"+255700000000\",\"code\":\"123456\",\"fullName\":\"Demo Rider\"}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/rider/verify-otp",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "rider",
+            "verify-otp"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Admin Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"email\":\"admin@zenjigo.example\",\"password\":\"ChangeMe_StrongPassword_123!\"}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/auth/admin/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "admin",
+            "login"
+          ]
+        }
+      }
+    },
+    {
+      "name": "My Profile",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/rider/me",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rider",
+            "me"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Ride Quote",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"rideType\":\"taxi\",\"pickupAddress\":\"Stone Town\",\"pickupLat\":-6.1659,\"pickupLng\":39.2026,\"destinationAddress\":\"Nungwi Beach\",\"destinationLat\":-5.726,\"destinationLng\":39.293}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rider/rides/quote",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rider",
+            "rides",
+            "quote"
+          ]
+        }
+      }
+    }
+  ]
+}

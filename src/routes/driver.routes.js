@@ -1,0 +1,4 @@
+const router=require('express').Router(); const {body}=require('express-validator'); const {validate}=require('../utils/validation'); const {upload}=require('../middleware/upload'); const c=require('../controllers/driver.controller');
+router.get('/me',c.profile); router.get('/documents',c.documents); router.patch('/online',[body('online').isBoolean()],validate,c.online); router.post('/location',[body('lat').isFloat({min:-90,max:90}),body('lng').isFloat({min:-180,max:180})],validate,c.location);
+router.get('/earnings',c.earnings); router.post('/payout',c.payout); router.get('/ride-requests',c.requests); router.post('/rides/:id/accept',c.accept); router.patch('/rides/:id/status',[body('status').isIn(['arriving','arrived','started','completed','cancelled'])],validate,c.status); router.get('/rides',c.history);
+module.exports=router;
