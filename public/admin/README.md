@@ -1,46 +1,57 @@
 # ZenjiGO Super Admin Web Frontend
 
-Responsive Super Admin frontend derived from the ZenjiGO Rider and Driver applications.
+Fully API-integrated Super Admin frontend for the ZenjiGO platform.
+
+## Features (all backed by live MySQL API)
+
+- Dashboard metrics
+- Rides list
+- Drivers: list, add, edit, approve/activate, suspend, deactivate
+- Riders: list, add, edit, restrict/activate, deactivate
+- Sub-admins: list, add, edit, deactivate
+- Parcels list
+- Tour packages: list, add, edit, deactivate
+- Finance: payments (complete pending), commission ledger
+- Withdrawals / payouts: approve, reject, mark paid
+- Promotions: create, edit, deactivate
+- Notifications: list + send to user
+- Support conversations list
+- Audit log
+- Commission & settlement settings
+- Platform settings view + API base URL config
 
 ## Run
-Open `index.html` in a browser, or serve this folder with any static server:
+
+### Option A — served by the backend (recommended)
 
 ```bash
+cd backend
+npm install
+npm run migrate
+npm run seed
+npm run dev
+```
+
+Open: `http://localhost:5000/admin`
+
+### Option B — static server
+
+```bash
+cd frontend
 python -m http.server 8080
 ```
 
-Then open `http://localhost:8080`.
+Open `http://localhost:8080` and ensure the API is running on port 5000.
 
-## Demo authentication
-- Email: any valid email (pre-filled with `admin@zenjigo.com`)
-- Password: any non-empty password (demo pre-filled)
-- OTP: any 6 digits
-- Forgot password: email → recovery OTP → new password
+## Auth
 
-## Complete frontend workflows
-The frontend now includes working UI flows rather than placeholder buttons/toasts for:
+Admin login uses email + password + OTP (Twilio Verify in production).
 
-- Dashboard operations and downloadable CSV reports
-- Global search across rides, drivers, riders, parcels, tours and withdrawals
-- Live operations and tracking navigation
-- Ride details, flags and lifecycle visibility
-- Driver profiles, creation, application approval/rejection, suspension and support messaging
-- Rider creation, account restriction, ride history, saved locations, payment methods and wallet ledger
-- Parcel booking and live tracking navigation
-- Tour package creation/editing and tracking navigation
-- Finance exports, commission configuration and local persistence
-- Driver withdrawal approval/rejection and payout exports
-- Promotion creation/editing, referral rules and driver incentives
-- Interactive support conversations, attachments, calls and escalation
-- Safety incident creation, escalation and resolution
-- Notification composition and queueing
-- Ride pricing editors, service configuration and zone/geofence settings
-- Admin invitations, access management and profile/settings navigation
-- Audit log exports
-- Platform settings persistence
-- Theme, responsive sidebar, authentication, OTP, reset-password flow, filters and toasts
+Seed credentials come from backend `.env`:
 
-Changes in this demo are maintained in frontend state and `localStorage` where appropriate. Replace mock data/actions with backend API calls when endpoints are available.
+- `SEED_ADMIN_EMAIL`
+- `SEED_ADMIN_PASSWORD`
 
 ## Tech
-HTML5, CSS3, Vanilla JavaScript, Bootstrap 5, Bootstrap Icons, Chart.js and Leaflet.
+
+HTML5, CSS3, Vanilla JS, Bootstrap 5, Bootstrap Icons, Chart.js, Leaflet.

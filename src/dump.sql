@@ -70,7 +70,7 @@ CREATE TABLE `app_settings` (
 
 LOCK TABLES `app_settings` WRITE;
 /*!40000 ALTER TABLE `app_settings` DISABLE KEYS */;
-INSERT INTO `app_settings` VALUES ('driver_commission','{\"cycleLimit\": 60000, \"percent\": 20, \"currency\": \"TZS\"}',NULL,'2026-10-01 03:46:22'),('rider_cancellation_fee','{\"percent\": 20, \"nearPickupKm\": 0.5}',NULL,'2026-10-01 03:46:22');
+INSERT INTO `app_settings` VALUES ('driver_commission','{\"thresholdTzs\": 60000, \"commissionPercent\": 20, \"driverPercent\": 80}',1,'2026-10-01 04:53:18'),('rider_cancellation','{\"nearPickupKm\": 1, \"percent\": 20}',1,'2026-10-01 04:53:18'),('rider_cancellation_fee','{\"percent\": 20, \"nearPickupKm\": 0.5}',NULL,'2026-10-01 03:46:22');
 /*!40000 ALTER TABLE `app_settings` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -553,7 +553,7 @@ CREATE TABLE `otp_verifications` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `target` varchar(190) NOT NULL,
   `channel` enum('sms','whatsapp','email') NOT NULL DEFAULT 'sms',
-  `purpose` enum('login','signup','driver_registration','password_reset') NOT NULL,
+  `purpose` enum('login','signup','driver_registration','password_reset','admin_login') NOT NULL,
   `provider_sid` varchar(100) DEFAULT NULL,
   `status` enum('pending','verified','expired','cancelled') NOT NULL DEFAULT 'pending',
   `attempts` int(11) NOT NULL DEFAULT 0,
@@ -1017,6 +1017,7 @@ CREATE TABLE `rides` (
   `final_fare` decimal(14,2) DEFAULT NULL,
   `discount` decimal(14,2) NOT NULL DEFAULT 0.00,
   `cancellation_fee` decimal(14,2) NOT NULL DEFAULT 0.00,
+  `cancellation_fee_applied` tinyint(1) NOT NULL DEFAULT 0,
   `tip` decimal(14,2) NOT NULL DEFAULT 0.00,
   `total_paid` decimal(14,2) NOT NULL DEFAULT 0.00,
   `payment_method` enum('cash','wallet','momo','bank','card') NOT NULL DEFAULT 'cash',
@@ -1108,7 +1109,7 @@ CREATE TABLE `schema_migrations` (
 
 LOCK TABLES `schema_migrations` WRITE;
 /*!40000 ALTER TABLE `schema_migrations` DISABLE KEYS */;
-INSERT INTO `schema_migrations` VALUES ('001_initial.sql','2026-10-01 04:35:33');
+INSERT INTO `schema_migrations` VALUES ('001_initial.sql','2026-10-01 04:35:33'),('002_business_rules.sql','2026-10-01 04:53:05'),('003_finance_hardening.sql','2026-10-01 04:53:05'),('004_schema_reconciliation.sql','2026-10-01 04:53:05');
 /*!40000 ALTER TABLE `schema_migrations` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1176,7 +1177,7 @@ CREATE TABLE `tour_packages` (
   KEY `idx_tour_active` (`is_active`),
   KEY `fk_tour_admin` (`created_by`),
   CONSTRAINT `fk_tour_admin` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1185,6 +1186,7 @@ CREATE TABLE `tour_packages` (
 
 LOCK TABLES `tour_packages` WRITE;
 /*!40000 ALTER TABLE `tour_packages` DISABLE KEYS */;
+INSERT INTO `tour_packages` VALUES (1,'Full-Day Island Tour','A customizable full-day Zanzibar island experience.',8.00,150000.00,4,'Confirm pickup point with the driver.',NULL,1,1,'2026-10-01 04:53:18','2026-10-01 04:53:18'),(2,'Nungwi Sunset Ride','Sunset trip with flexible pickup.',4.00,85000.00,4,'Pickup time should be confirmed before departure.',NULL,1,1,'2026-10-01 04:53:18','2026-10-01 04:53:18');
 /*!40000 ALTER TABLE `tour_packages` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1218,7 +1220,7 @@ CREATE TABLE `users` (
   UNIQUE KEY `uq_users_email` (`email`),
   KEY `idx_users_role_status` (`role`,`status`),
   KEY `idx_users_created` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1227,6 +1229,7 @@ CREATE TABLE `users` (
 
 LOCK TABLES `users` WRITE;
 /*!40000 ALTER TABLE `users` DISABLE KEYS */;
+INSERT INTO `users` VALUES (1,'admin','ZenjiGO Administrator','+255677532140','admin@zenjigo.com','$2b$12$2UGjWp6fMhiK80O.WFlVze7cv4OGBxrpnl6qWIWL848Da5jPtLLtG',NULL,NULL,NULL,NULL,NULL,'active',NULL,'2026-09-30 23:23:18',NULL,'2026-10-01 04:53:18','2026-10-01 04:57:55');
 /*!40000 ALTER TABLE `users` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1336,4 +1339,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-01  4:39:02
+-- Dump completed on 2026-10-01  5:01:01

@@ -20,4 +20,4 @@ async function rotateRefreshToken(raw){
   return {accessToken:access,refreshToken:refresh,userId:rows[0].user_id,role:rows[0].role};
 }
 async function revokeRefresh(raw){await db.query('UPDATE refresh_tokens SET revoked_at=UTC_TIMESTAMP() WHERE token_hash=?',[hashToken(raw)]);}
-module.exports={signAccess,verifyAccess,issueRefreshToken,rotateRefreshToken,revokeRefresh};
+module.exports={signAccess,verifyAccess,issueRefreshToken,rotateRefreshToken,revokeRefresh,revokeRefreshToken:revokeRefresh};

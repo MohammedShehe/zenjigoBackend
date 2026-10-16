@@ -1,5 +1,5 @@
 const auth=require('../services/auth.service');
-const {rotateRefreshToken,revokeRefreshToken}=require('../utils/jwt');
+const {rotateRefreshToken,revokeRefresh}=require('../utils/jwt');
 const {ok}=require('../utils/response');
 const asyncHandler=require('../utils/asyncHandler');
 exports.sendOtp=asyncHandler(async(req,res)=>ok(res,await auth.sendOtp(req.body),'OTP sent'));
@@ -12,4 +12,4 @@ exports.refresh=asyncHandler(async(req,res)=>{
   if(!data) return res.status(401).json({success:false,message:'Invalid refresh token'});
   ok(res,data,'Token refreshed');
 });
-exports.logout=asyncHandler(async(req,res)=>{await revokeRefreshToken(req.body.refreshToken||'');ok(res,null,'Logged out');});
+exports.logout=asyncHandler(async(req,res)=>{await revokeRefresh(req.body.refreshToken||'');ok(res,null,'Logged out');});
