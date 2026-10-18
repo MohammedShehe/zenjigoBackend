@@ -1,7 +1,60 @@
+# Dependencies
 node_modules/
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+
+# Build output
+build/
+dist/
+coverage/
+
+# Logs & temp
+*.log
+*.tmp
+*.swp
+*.lock
+*.bak
+logs/
+
+# Environment files
+.env
 .env.local
 .env.*.local
-*.log
-coverage/
-.DS_Store
+.env.example
 firebase-service-account.json
+
+# Android
+android/.gradle/
+android/app/build/
+android/local.properties
+android/key.properties
+*.jks
+*.keystore
+
+# iOS/macOS
+ios/Pods/
+ios/Runner/GeneratedPluginRegistrant.*
+ios/Flutter/Generated.xcconfig
+macos/Pods/
+macos/Flutter/GeneratedPluginRegistrant.*
+macos/Flutter/Generated.xcconfig
+
+# Xcode
+*.xcworkspace
+*.xcuserstate
+*.xcuserdatad*
+DerivedData/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+
+# OS-specific
+.DS_Store
+Thumbs.db
