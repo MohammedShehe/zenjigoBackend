@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const requiredInProduction = [
   'JWT_ACCESS_SECRET','JWT_REFRESH_SECRET',
-  'TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_VERIFY_SERVICE_SID',
+  'NEXTSMS_USERNAME','NEXTSMS_PASSWORD','NEXTSMS_SENDER_ID',
   'CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET'
 ];
 
@@ -35,11 +35,17 @@ module.exports = {
     refreshExpires: process.env.JWT_REFRESH_EXPIRES || '30d'
   },
   corsOrigins: csv(process.env.CORS_ORIGINS, 'http://localhost:5000,http://127.0.0.1:5000,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5501,http://127.0.0.1:5501'),
-  twilio: {
-    accountSid: process.env.TWILIO_ACCOUNT_SID,
-    authToken: process.env.TWILIO_AUTH_TOKEN,
-    verifyServiceSid: process.env.TWILIO_VERIFY_SERVICE_SID,
-    channel: process.env.TWILIO_OTP_CHANNEL || 'sms'
+  // NextSMS (replaces Twilio) — Internet SMS + WhatsApp SMS
+  nextsms: {
+    username: process.env.NEXTSMS_USERNAME,
+    password: process.env.NEXTSMS_PASSWORD,
+    // Optional pre-computed Basic token: base64(username:password)
+    apiKey: process.env.NEXTSMS_API_KEY || '',
+    senderId: process.env.NEXTSMS_SENDER_ID || 'NEXTSMS',
+    baseUrl: process.env.NEXTSMS_BASE_URL || 'https://messaging-service.co.tz',
+    // production | testing  (testing uses /api/.../v2/test/... endpoints)
+    environment: process.env.NEXTSMS_ENVIRONMENT || 'production',
+    defaultChannel: process.env.NEXTSMS_DEFAULT_CHANNEL || 'sms' // sms | whatsapp
   },
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
@@ -60,12 +66,16 @@ module.exports = {
     rateWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
     rateMax: Number(process.env.RATE_LIMIT_MAX || 300)
   },
+  // PayGrid payment provider (replaces generic example)
   payment: {
-    provider: process.env.PAYMENT_PROVIDER || 'example',
-    baseUrl: process.env.PAYMENT_API_BASE_URL || '',
-    apiKey: process.env.PAYMENT_API_KEY || '',
-    merchantId: process.env.PAYMENT_MERCHANT_ID || '',
-    webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET || ''
+    provider: process.env.PAYMENT_PROVIDER || 'paygrid',
+    baseUrl: process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || '',
+    apiKey: process.env.PAYGRID_API_KEY || process.env.PAYMENT_API_KEY || '',
+    secretKey: process.env.PAYGRID_SECRET_KEY || '',
+    merchantId: process.env.PAYGRID_MERCHANT_ID || process.env.PAYMENT_MERCHANT_ID || '',
+    webhookSecret: process.env.PAYGRID_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '',
+    // Optional: public key for client-side / hosted checkout
+    publicKey: process.env.PAYGRID_PUBLIC_KEY || ''
   },
   ride: {
     currency: process.env.CURRENCY || 'TZS',

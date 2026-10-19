@@ -3,7 +3,7 @@ const db=require('../config/db');
 const ApiError=require('../utils/ApiError');
 const config=require('../config/env');
 function verifySignature(raw,signature){
- const secret=process.env.PAYMENT_WEBHOOK_SECRET||'CHANGE_ME_PAYMENT_WEBHOOK_SECRET';
+ const secret=process.env.PAYGRID_WEBHOOK_SECRET||process.env.PAYMENT_WEBHOOK_SECRET||'CHANGE_ME_PAYMENT_WEBHOOK_SECRET';
  if(!signature) return false;
  const expected=crypto.createHmac('sha256',secret).update(raw).digest('hex');
  return crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(String(signature)));
