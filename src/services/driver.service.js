@@ -2,7 +2,10 @@ const db=require('../config/db'); const ApiError=require('../utils/ApiError'); c
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
  const phone=normalizePhone(data.phone);
- if(data.phoneOtpCode) await otp.verify({target:phone,code:data.phoneOtpCode,purpose:'driver_registration'}); else throw ApiError.badRequest('phoneOtpCode is required for driver registration.'); if(!data.fullName||!data.email||!data.nationalId)throw ApiError.badRequest('fullName, phone, email and nationalId are required.');
+ if(data.phoneOtpCode) await otp.verify({target:phone,code:data.phoneOtpCode,purpose:'driver_registration'}); else throw ApiError.badRequest('phoneOtpCode is required for driver registration.');
+ const emailTarget=String(data.email||'').trim().toLowerCase();
+ if(data.emailOtpCode) await otp.verify({target:emailTarget,code:data.emailOtpCode,purpose:'driver_registration'}); else throw ApiError.badRequest('emailOtpCode is required for driver registration.');
+ if(!data.fullName||!data.email||!data.nationalId)throw ApiError.badRequest('fullName, phone, email and nationalId are required.');
  if(!files?.license?.[0] || !files?.nationalId?.[0] || !files?.insurance?.[0] || !files?.driverPhoto?.[0]) throw ApiError.badRequest('License, national ID, insurance and driver photo are required.');
  const existing=await db.query('SELECT id FROM users WHERE phone=? OR email=?',[phone,data.email.toLowerCase()]); if(existing.length)throw ApiError.conflict('A user already exists with this phone or email.');
  const result=await db.transaction(async conn=>{
