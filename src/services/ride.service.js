@@ -139,4 +139,97 @@ async function chargeWallet(userId,amount,type,refId,description){
  });
 }
 async function pushUser(userId,title,body,data){const t=await db.query('SELECT token FROM device_tokens WHERE user_id=?',[userId]); await sendPush(t.map(x=>x.token),{title,body},data);}
-module.exports={quote,create,getById,listForUser,accept,setStatus,cancelRider,rate,haversine,chargeWallet};
+
+/** Preview cancellation fee without applying it. */
+async function cancelPreview(riderId, rideId) {
+  const r = await db.query(
+    `SELECT r.*, d.current_lat, d.current_lng
+     FROM rides r
+     LEFT JOIN driver_profiles d ON d.user_id = r.driver_id
+     WHERE r.id = ? AND r.rider_id = ?`,
+    [rideId, riderId]
+  );
+  if (!r.length) throw ApiError.notFound('Ride not found');
+  const x = r[0];
+  if (!['searching', 'accepted', 'arriving', 'arrived'].includes(x.status)) {
+    throw ApiError.conflict('This ride cannot be cancelled now.');
+  }
+  let fee = 0;
+  let near = false;
+  let distanceKm = null;
+  if (x.driver_id && x.current_lat != null && x.current_lng != null) {
+    distanceKm = finance.haversine(
+      Number(x.current_lat),
+      Number(x.current_lng),
+      Number(x.pickup_lat),
+      Number(x.pickup_lng)
+    );
+    near = distanceKm <= finance.NEAR_RADIUS || x.status === 'arrived';
+    if (near) fee = Math.round(Number(x.estimated_fare) * finance.CANCEL_PERCENT / 100);
+  }
+  return {
+    canCancel: true,
+    cancellationFee: fee,
+    fee,
+    nearPickup: near,
+    distanceKm,
+    nearPickupKm: finance.NEAR_RADIUS,
+    percent: finance.CANCEL_PERCENT,
+    reason: fee > 0
+      ? `Driver is within ${finance.NEAR_RADIUS} km of pickup (or has arrived). ${finance.CANCEL_PERCENT}% of estimated fare applies.`
+      : 'No cancellation fee for this ride at this time.',
+    chargedOnNextRide: fee > 0
+  };
+}
+
+/**
+ * Online drivers near a point (for map display).
+ * Uses driver_profiles.current_lat/lng updated by the driver app.
+ */
+async function nearbyDrivers(lat, lng, radiusKm = 5) {
+  const radius = Math.min(Math.max(Number(radiusKm) || 5, 0.5), 50);
+  const plat = Number(lat);
+  const plng = Number(lng);
+  if (Number.isNaN(plat) || Number.isNaN(plng)) throw ApiError.badRequest('lat and lng are required');
+  // Bounding box then precise haversine filter in JS for simplicity
+  const deg = radius / 111; // ~km per degree latitude
+  const rows = await db.query(
+    `SELECT d.user_id AS id, u.full_name AS fullName, u.photo_url AS photoUrl,
+            d.current_lat AS lat, d.current_lng AS lng, d.rating,
+            v.type AS vehicleType, v.plate_number AS plateNumber
+     FROM driver_profiles d
+     JOIN users u ON u.id = d.user_id AND u.status = 'active'
+     LEFT JOIN vehicles v ON v.driver_id = d.user_id AND v.status = 'active'
+     WHERE d.online = 1
+       AND d.application_status = 'active'
+       AND d.current_lat IS NOT NULL
+       AND d.current_lng IS NOT NULL
+       AND d.current_lat BETWEEN ? AND ?
+       AND d.current_lng BETWEEN ? AND ?
+     LIMIT 80`,
+    [plat - deg, plat + deg, plng - deg, plng + deg]
+  );
+  return rows
+    .map((d) => {
+      const km = haversine(plat, plng, Number(d.lat), Number(d.lng));
+      return { ...d, distanceKm: Math.round(km * 100) / 100 };
+    })
+    .filter((d) => d.distanceKm <= radius)
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, 40);
+}
+
+module.exports = {
+  quote,
+  create,
+  getById,
+  listForUser,
+  accept,
+  setStatus,
+  cancelRider,
+  cancelPreview,
+  nearbyDrivers,
+  rate,
+  haversine,
+  chargeWallet
+};

@@ -258,6 +258,14 @@ app.use(
   require('./routes/ride.routes')
 );
 
+// Online drivers near a lat/lng (map markers for rider booking screen)
+app.get(
+  `${p}/rider/drivers/nearby`,
+  auth,
+  roles('rider'),
+  require('./controllers/ride.controller').nearbyDrivers
+);
+
 app.use(
   `${p}/rider/wallet`,
   auth,

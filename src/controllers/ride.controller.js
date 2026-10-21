@@ -4,6 +4,11 @@ exports.create=asyncHandler(async(req,res)=>ok(res,await service.create(req.user
 exports.list=asyncHandler(async(req,res)=>ok(res,await service.listForUser(req.user.sub,req.user.role,req.query.limit)));
 exports.get=asyncHandler(async(req,res)=>ok(res,await service.getById(req.params.id,req.user.sub)));
 exports.cancel=asyncHandler(async(req,res)=>ok(res,await service.cancelRider(req.user.sub,req.params.id,req.body.reason),'Ride cancelled'));
+exports.cancelPreview=asyncHandler(async(req,res)=>ok(res,await service.cancelPreview(req.user.sub,req.params.id)));
+exports.nearbyDrivers=asyncHandler(async(req,res)=>{
+  const lat = req.query.lat, lng = req.query.lng, radius = req.query.radius || req.query.radiusKm || 5;
+  ok(res, await service.nearbyDrivers(lat, lng, radius));
+});
 exports.rate=asyncHandler(async(req,res)=>ok(res,await service.rate(req.user.sub,req.params.id,req.body.stars,req.body.feedback,req.body.tip),'Ride rated'));
 exports.track=asyncHandler(async(req,res)=>{
  const r=await service.getById(req.params.id,req.user.sub); if(!r.driver_id)return ok(res,{ride:r,location:null});
