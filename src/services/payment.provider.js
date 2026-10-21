@@ -1,162 +1,161 @@
 /**
- * PayGrid payment provider adapter.
+ * PayGrid (Briq MeetPay) provider — aligned with official docs:
+ * https://paydocs.briq.tz/
  *
- * Production checklist:
- * 1. Set in .env:
- *      PAYMENT_PROVIDER=paygrid
- *      PAYGRID_API_BASE_URL=https://<your-paygrid-host>/v1   (no trailing slash issues handled)
- *      PAYGRID_API_KEY=...
- *      PAYGRID_SECRET_KEY=...          (optional, if provider uses dual keys)
- *      PAYGRID_MERCHANT_ID=...
- *      PAYGRID_PUBLIC_KEY=...          (optional client-side)
- *      PAYGRID_WEBHOOK_SECRET=...      (HMAC secret from PayGrid dashboard)
- *      PAYGRID_CALLBACK_URL=https://YOUR_API/api/v1/payments/webhook
- *
- * 2. In PayGrid dashboard set webhook / callback URL to PAYGRID_CALLBACK_URL.
- *
- * Endpoint paths below match a common REST collect/charge style.
- * If your PayGrid dashboard documents different paths or field names,
- * change only the URL path and body keys in this file — the rest of the app stays the same.
- *
- * Never store raw card data; store provider tokens/mandates only.
+ * Base URL: https://meet.briq.tz
+ * Auth:    Authorization: Bearer <api_key>
+ * Create:  POST /api/v1/payments  (+ required Idempotency-Key header)
+ * Mobile:  type: "mobile", phone, customer{firstname,lastname,email}, amount, currency
+ * Webhook: X-MeetPay-Signature: sha256=<hmac_hex>  (signing key ≠ api_key)
  */
-const config = require('../config/env');
 const crypto = require('crypto');
+const config = require('../config/env');
+
+const DEFAULT_BASE = 'https://meet.briq.tz';
 
 function isConfigured() {
   const p = config.payment;
+  const key = p.apiKey || '';
   return (
-    p.provider === 'paygrid' &&
-    !!p.baseUrl &&
-    !!p.apiKey &&
-    !String(p.apiKey).includes('CHANGE_ME')
+    (p.provider === 'paygrid' || !p.provider) &&
+    !!key &&
+    !String(key).includes('CHANGE_ME')
   );
 }
 
 function baseUrl() {
-  return String(config.payment.baseUrl || '').replace(/\/$/, '');
+  const u = String(config.payment.baseUrl || process.env.PAYGRID_API_BASE_URL || DEFAULT_BASE).replace(/\/$/, '');
+  // Official host is meet.briq.tz — if user left example host, use production default when key looks real
+  if (u.includes('paygrid.example') || u.includes('api.paygrid.example')) return DEFAULT_BASE;
+  return u;
 }
 
-function authHeaders() {
-  return {
+function authHeaders(idempotencyKey) {
+  const headers = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
-    Authorization: `Bearer ${config.payment.apiKey}`,
-    'X-Api-Key': config.payment.apiKey,
-    'X-Merchant-Id': config.payment.merchantId || ''
+    Authorization: `Bearer ${config.payment.apiKey}`
   };
+  if (idempotencyKey) headers['Idempotency-Key'] = String(idempotencyKey).slice(0, 255);
+  return headers;
+}
+
+function normalizeTzPhone(phone) {
+  let d = String(phone || '').replace(/\D/g, '');
+  if (d.startsWith('0') && d.length === 10) d = '255' + d.slice(1);
+  if (d.length === 9 && (d.startsWith('6') || d.startsWith('7'))) d = '255' + d;
+  return d;
 }
 
 /**
- * Charge driver commission (or any direct charge against a saved payment method).
+ * Create mobile money payment (USSD push).
+ * Official: POST /api/v1/payments  type: mobile
  */
-async function chargeDriverCommission({ amount, currency, driverId, paymentMethod }) {
+async function initiateCollect({ amount, currency, userId, phone, reference, customer, network, metadata }) {
   if (!isConfigured()) {
     return {
       provider: 'paygrid-dev',
-      externalReference: `PAYGRID-COM-${driverId}-${Date.now()}`
-    };
-  }
-
-  const body = {
-    merchant_id: config.payment.merchantId,
-    amount: Number(amount),
-    currency: currency || 'TZS',
-    customer_reference: String(driverId),
-    payment_method_token: paymentMethod?.provider_token || paymentMethod?.token,
-    phone: paymentMethod?.phone || undefined,
-    reference: `ZENJIGO-COM-${driverId}-${Date.now()}`,
-    description: 'ZenjiGO driver commission',
-    metadata: { type: 'driver_commission', driverId: String(driverId) }
-  };
-
-  const res = await fetch(`${baseUrl()}/charges`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(body)
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.status === 'failed' || data.success === false) {
-    throw new Error(data.message || data.error || 'PayGrid rejected the commission payment.');
-  }
-
-  return {
-    provider: 'paygrid',
-    externalReference: data.reference || data.transaction_id || data.id || body.reference,
-    raw: data
-  };
-}
-
-/**
- * Initiate a mobile-money / wallet top-up collect (USSD push style).
- * Caller stores payment_transactions as pending and waits for webhook.
- */
-async function initiateCollect({ amount, currency, userId, phone, reference }) {
-  if (!isConfigured()) {
-    return {
-      provider: 'paygrid-dev',
-      externalReference: reference || `PAYGRID-TOPUP-${userId}-${Date.now()}`,
+      externalReference: reference || `ZENJIGO-TOPUP-${userId}-${Date.now()}`,
       status: 'pending'
     };
   }
 
-  const normalizedPhone = String(phone || '').replace(/\D/g, '');
+  const idem = reference || `ZENJIGO-${userId}-${Date.now()}`;
   const body = {
-    merchant_id: config.payment.merchantId,
     amount: Number(amount),
     currency: currency || 'TZS',
-    phone: normalizedPhone,
-    msisdn: normalizedPhone,
-    customer_reference: String(userId),
-    reference: reference || `ZENJIGO-TOPUP-${userId}-${Date.now()}`,
-    callback_url: process.env.PAYGRID_CALLBACK_URL || undefined,
-    webhook_url: process.env.PAYGRID_CALLBACK_URL || undefined,
-    description: 'ZenjiGO wallet top-up',
+    type: 'mobile',
+    phone: normalizeTzPhone(phone),
+    customer: {
+      firstname: customer?.firstname || customer?.firstName || 'ZenjiGO',
+      lastname: customer?.lastname || customer?.lastName || 'User',
+      email: customer?.email || `user${userId}@zenjigo.online`
+    },
+    reference: idem,
+    webhook_url: process.env.PAYGRID_CALLBACK_URL || process.env.PAYGRID_WEBHOOK_URL || undefined,
     metadata: {
-      type: 'wallet_topup',
+      ...(metadata || {}),
       userId: String(userId),
-      paymentId: undefined // filled by service after insert if needed
+      channel: 'wallet_topup'
     }
   };
+  if (network) body.network = network;
 
-  // Try primary collect path; some dashboards use /payments/collect
-  const paths = ['/collect', '/payments/collect', '/v1/collect'];
-  let lastErr = null;
-  for (const path of paths) {
-    try {
-      const res = await fetch(`${baseUrl()}${path}`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify(body)
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success !== false && data.status !== 'failed') {
-        return {
-          provider: 'paygrid',
-          externalReference: data.reference || data.transaction_id || data.id || body.reference,
-          status: data.status || 'pending',
-          raw: data
-        };
-      }
-      lastErr = new Error(data.message || data.error || `PayGrid collect failed (${res.status})`);
-      // 404 → try next path
-      if (res.status !== 404) break;
-    } catch (e) {
-      lastErr = e;
-    }
+  const res = await fetch(`${baseUrl()}/api/v1/payments`, {
+    method: 'POST',
+    headers: authHeaders(idem),
+    body: JSON.stringify(body)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  // Envelope: { status, code, message, data }
+  const payload = data.data || data;
+  const ok =
+    res.ok &&
+    data.status !== 'error' &&
+    data.error_code == null &&
+    (payload.status === 'pending' || payload.status === 'processing' || payload.status === 'completed' || res.status === 200 || res.status === 201);
+
+  if (!ok) {
+    const msg =
+      data.message ||
+      data.error_code ||
+      payload.message ||
+      (data.details && JSON.stringify(data.details)) ||
+      `PayGrid payment failed (${res.status})`;
+    throw new Error(msg);
   }
-  throw lastErr || new Error('PayGrid collect request failed.');
+
+  return {
+    provider: 'paygrid',
+    externalReference: payload.id || payload.transaction_id || payload.reference || idem,
+    status: payload.status || 'pending',
+    raw: payload
+  };
 }
 
-function verifyWebhook(rawBody, signature) {
-  const secret = config.payment.webhookSecret;
-  if (!secret) return false;
+/**
+ * Charge saved method / commission — uses same create payment API (mobile).
+ */
+async function chargeDriverCommission({ amount, currency, driverId, paymentMethod, customer }) {
+  if (!isConfigured()) {
+    return {
+      provider: 'paygrid-dev',
+      externalReference: `ZENJIGO-COM-${driverId}-${Date.now()}`
+    };
+  }
+
+  const phone = paymentMethod?.phone || paymentMethod?.msisdn;
+  if (!phone) throw new Error('Driver payment method has no phone number for PayGrid mobile charge.');
+
+  const reference = `ZENJIGO-COM-${driverId}-${Date.now()}`;
+  const result = await initiateCollect({
+    amount,
+    currency: currency || 'TZS',
+    userId: driverId,
+    phone,
+    reference,
+    customer,
+    metadata: { type: 'driver_commission', driverId: String(driverId) }
+  });
+  return result;
+}
+
+/**
+ * Verify X-MeetPay-Signature (HMAC-SHA256 of raw body).
+ * Header value format: sha256=<hex>
+ * Use PAYGRID_WEBHOOK_SECRET / webhook signing key from PayGrid (not the API key).
+ */
+function verifyWebhook(rawBody, signatureHeader) {
+  const secret = config.payment.webhookSecret || process.env.PAYGRID_WEBHOOK_SECRET || '';
+  if (!secret || String(secret).includes('CHANGE_ME')) return false;
   try {
-    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-    const sig = String(signature || '').replace(/^sha256=/i, '');
-    if (expected.length !== sig.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(sig));
+    const raw = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody || ''), 'utf8');
+    const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+    let sig = String(signatureHeader || '').trim();
+    if (sig.toLowerCase().startsWith('sha256=')) sig = sig.slice(7);
+    if (!sig || expected.length !== sig.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(sig, 'utf8'));
   } catch {
     return false;
   }
@@ -166,5 +165,6 @@ module.exports = {
   chargeDriverCommission,
   initiateCollect,
   verifyWebhook,
-  isConfigured
+  isConfigured,
+  baseUrl
 };

@@ -69,7 +69,7 @@ module.exports = {
   // PayGrid payment provider (replaces generic example)
   payment: {
     provider: process.env.PAYMENT_PROVIDER || 'paygrid',
-    baseUrl: process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || '',
+    baseUrl: process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || 'https://meet.briq.tz',
     apiKey: process.env.PAYGRID_API_KEY || process.env.PAYMENT_API_KEY || '',
     secretKey: process.env.PAYGRID_SECRET_KEY || '',
     merchantId: process.env.PAYGRID_MERCHANT_ID || process.env.PAYMENT_MERCHANT_ID || '',

@@ -9,17 +9,11 @@ const {
 } = require('../services/payment.service');
 
 /**
- * PayGrid webhook endpoint.
+ * PayGrid webhook + callback
  * POST /api/v1/payments/webhook
- *
- * Set this exact URL in your PayGrid dashboard:
- *   https://YOUR_API_DOMAIN/api/v1/payments/webhook
- *
- * Signature headers accepted (first non-empty wins):
- *   x-paygrid-signature | x-zenjigo-signature | x-signature | x-hub-signature-256
- *
- * Verified with PAYGRID_WEBHOOK_SECRET (HMAC-SHA256 of raw body).
- * In non-production, if the secret still contains CHANGE_ME, signature check is skipped.
+ * Dashboard: set webhook URL to https://YOUR_API/api/v1/payments/webhook
+ * Header: X-MeetPay-Signature: sha256=<hmac>
+ * Docs: https://paydocs.briq.tz/guides/webhooks/verify-signatures
  */
 router.post('/webhook', async (req, res) => {
   try {
@@ -28,13 +22,13 @@ router.post('/webhook', async (req, res) => {
       : Buffer.from(JSON.stringify(req.body || {}));
 
     const sig =
+      req.get('x-meetpay-signature') ||
+      req.get('X-MeetPay-Signature') ||
       req.get('x-paygrid-signature') ||
-      req.get('x-zenjigo-signature') ||
       req.get('x-signature') ||
-      req.get('x-hub-signature-256') ||
       '';
 
-    const secret = process.env.PAYGRID_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
+    const secret = process.env.PAYGRID_WEBHOOK_SECRET || '';
     const skipSig =
       process.env.NODE_ENV !== 'production' &&
       (!secret || String(secret).includes('CHANGE_ME'));
@@ -44,14 +38,20 @@ router.post('/webhook', async (req, res) => {
     }
 
     const body = req.body && typeof req.body === 'object' ? req.body : {};
+
+    // Dashboard test event
+    if (body.event === 'webhook.test') {
+      return res.json({ success: true, message: 'Test webhook received' });
+    }
+
     const event = normalizeWebhookPayload(body);
     const payment = await findPaymentFromWebhook(event);
 
     if (!payment) {
       return res.json({
         success: true,
-        message: 'No matching payment transaction; ignored.',
-        reference: event.externalReference
+        message: 'No matching payment; acknowledged.',
+        reference: event.merchantReference || event.externalReference
       });
     }
 
@@ -64,18 +64,18 @@ router.post('/webhook', async (req, res) => {
       return res.json({ success: true, data: { paymentId: payment.id, status: 'failed' } });
     }
 
-    if (event.success || !event.rawStatus) {
+    if (event.success) {
       const p = await completeWalletTopup(
         payment.id,
         event.externalReference || payment.external_reference,
-        event.provider
+        'paygrid'
       );
       return res.json({ success: true, data: { paymentId: p.id, status: 'success' } });
     }
 
     return res.json({
       success: true,
-      data: { paymentId: payment.id, status: payment.status, note: 'intermediate status acknowledged' }
+      data: { paymentId: payment.id, status: payment.status }
     });
   } catch (e) {
     console.error('[PayGrid webhook]', e.message);
@@ -83,16 +83,14 @@ router.post('/webhook', async (req, res) => {
   }
 });
 
-/**
- * GET /api/v1/payments/status – ops check (no secrets).
- */
 router.get('/status', (req, res) => {
-  const { isConfigured } = require('../services/payment.provider');
+  const { isConfigured, baseUrl } = require('../services/payment.provider');
   res.json({
     success: true,
     data: {
-      provider: process.env.PAYMENT_PROVIDER || 'paygrid',
+      provider: 'paygrid',
       configured: isConfigured(),
+      baseUrl: baseUrl(),
       webhookPath: '/api/v1/payments/webhook'
     }
   });

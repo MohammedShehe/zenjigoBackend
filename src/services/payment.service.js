@@ -1,6 +1,6 @@
 /**
- * Payment service – wallet top-ups, webhook completion, status helpers.
- * Uses PayGrid via payment.provider.js.
+ * Payment service — wallet top-ups & PayGrid webhooks
+ * Docs: https://paydocs.briq.tz/
  */
 const crypto = require('crypto');
 const db = require('../config/db');
@@ -9,42 +9,13 @@ const config = require('../config/env');
 const provider = require('./payment.provider');
 
 function getWebhookSecret() {
-  return (
-    config.payment.webhookSecret ||
-    process.env.PAYGRID_WEBHOOK_SECRET ||
-    process.env.PAYMENT_WEBHOOK_SECRET ||
-    ''
-  );
+  return config.payment.webhookSecret || process.env.PAYGRID_WEBHOOK_SECRET || '';
 }
 
-/**
- * Verify HMAC-SHA256 webhook signature.
- * Accepts hex or base64 signature; compares against raw request body.
- */
 function verifySignature(rawBody, signature) {
-  const secret = getWebhookSecret();
-  if (!secret || !signature) return false;
-  try {
-    const raw = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody || ''), 'utf8');
-    const expectedHex = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    const expectedB64 = crypto.createHmac('sha256', secret).update(raw).digest('base64');
-    const sig = String(signature).trim();
-    const clean = sig.replace(/^sha256=/i, '');
-    if (expectedHex.length === clean.length && crypto.timingSafeEqual(Buffer.from(expectedHex), Buffer.from(clean))) {
-      return true;
-    }
-    if (expectedB64.length === clean.length && crypto.timingSafeEqual(Buffer.from(expectedB64), Buffer.from(clean))) {
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  return provider.verifyWebhook(rawBody, signature);
 }
 
-/**
- * Mark a pending payment_transactions row as success and credit the wallet.
- */
 async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid') {
   return db.transaction(async (conn) => {
     const [rows] = await conn.query(
@@ -77,44 +48,27 @@ async function completeWalletTopup(paymentId, externalReference, providerName = 
     }
     await conn.query(
       `INSERT INTO wallet_transactions
-         (user_id, type, amount, balance_before, balance_after, reference_type, reference_id, payment_method, description)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        p.user_id,
-        'topup',
-        p.amount,
-        before,
-        after,
-        'payment',
-        p.id,
-        providerName || 'paygrid',
-        'Wallet top-up'
-      ]
+         (user_id, type, amount, balance_before, balance_after, reference_type, reference_id, payment_method, description, status)
+       VALUES (?, 'topup', ?, ?, ?, 'payment', ?, ?, 'Wallet top-up', 'success')`,
+      [p.user_id, p.amount, before, after, p.id, providerName || 'paygrid']
     );
     return { ...p, status: 'success' };
   });
 }
 
-/**
- * Mark payment failed (idempotent).
- */
 async function failPayment(paymentId, reason) {
   await db.query(
     `UPDATE payment_transactions
      SET status = 'failed',
          metadata = JSON_SET(COALESCE(metadata, '{}'), '$.failReason', ?)
      WHERE id = ? AND status = 'pending'`,
-    [String(reason || 'provider_failed'), paymentId]
+    [String(reason || 'failed'), paymentId]
   );
 }
 
-/**
- * Initiate a PayGrid collect (mobile money USSD push / hosted collect).
- * Creates a pending payment_transactions row then calls the provider.
- */
-async function initiateTopup({ userId, amount, phone, currency }) {
+async function initiateTopup({ userId, amount, phone, currency, customer, network }) {
   const amt = Number(amount);
-  if (!amt || amt <= 0) throw ApiError.badRequest('Amount must be greater than zero.');
+  if (!amt || amt < 500) throw ApiError.badRequest('Minimum top-up amount is 500 TZS.');
   if (!phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
 
   const reference = `ZENJIGO-TOPUP-${userId}-${Date.now()}`;
@@ -126,7 +80,7 @@ async function initiateTopup({ userId, amount, phone, currency }) {
       userId,
       amt,
       currency || config.ride.currency || 'TZS',
-      config.payment.provider || 'paygrid',
+      'paygrid',
       reference,
       JSON.stringify({ phone, requestedBy: userId, channel: 'wallet_topup' })
     ]
@@ -134,12 +88,31 @@ async function initiateTopup({ userId, amount, phone, currency }) {
   const paymentId = insert.insertId;
 
   try {
+    // Load user profile for customer object required by PayGrid
+    let cust = customer;
+    if (!cust) {
+      const users = await db.query(
+        'SELECT full_name, email, phone FROM users WHERE id = ? LIMIT 1',
+        [userId]
+      );
+      const u = users[0] || {};
+      const parts = String(u.full_name || 'ZenjiGO User').trim().split(/\s+/);
+      cust = {
+        firstname: parts[0] || 'ZenjiGO',
+        lastname: parts.slice(1).join(' ') || 'User',
+        email: u.email || `user${userId}@zenjigo.online`
+      };
+    }
+
     const result = await provider.initiateCollect({
       amount: amt,
       currency: currency || config.ride.currency || 'TZS',
       userId,
       phone,
-      reference
+      reference,
+      customer: cust,
+      network,
+      metadata: { paymentId }
     });
 
     if (result.externalReference && result.externalReference !== reference) {
@@ -149,91 +122,77 @@ async function initiateTopup({ userId, amount, phone, currency }) {
       );
     }
 
-    // In dev mode without real keys, optionally auto-complete so UI can be tested
-    if (result.provider === 'paygrid-dev' && process.env.PAYGRID_AUTO_COMPLETE_DEV === 'true') {
-      await completeWalletTopup(paymentId, result.externalReference, 'paygrid-dev');
-      return {
-        paymentId,
-        status: 'success',
-        externalReference: result.externalReference,
-        message: 'Dev auto-completed top-up (PAYGRID_AUTO_COMPLETE_DEV=true).'
-      };
-    }
-
     return {
       paymentId,
       status: result.status || 'pending',
       externalReference: result.externalReference || reference,
       provider: result.provider,
-      message:
-        'Top-up initiated. Confirm the prompt on your phone. Wallet will be credited when PayGrid webhook confirms payment.'
+      message: 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
     };
   } catch (err) {
     await failPayment(paymentId, err.message);
-    throw ApiError.badRequest(err.message || 'Payment provider rejected the top-up request.');
+    throw ApiError.badRequest(err.message || 'Payment could not be started.');
   }
 }
 
 /**
- * Parse a flexible PayGrid / generic webhook payload into a normalized event.
+ * Official PayGrid webhook payload:
+ * { event: "payment.completed", event_id, transaction_id, merchant_reference,
+ *   data: { amount, currency, status, ... }, metadata, timestamp }
+ * Callback: { type: "transaction.callback", transaction_id, merchant_reference, status, ... }
  */
 function normalizeWebhookPayload(body) {
   const b = body || {};
-  const statusRaw = String(
-    b.status || b.transaction_status || b.event || b.type || ''
-  ).toLowerCase();
+  const eventName = String(b.event || b.type || '').toLowerCase();
+  const data = b.data || {};
+  const statusRaw = String(data.status || b.status || eventName || '').toLowerCase();
+
   const success =
-    ['success', 'successful', 'completed', 'paid', 'confirmed', 'charge.succeeded', 'payment.success'].some(
-      (s) => statusRaw.includes(s)
-    );
+    eventName === 'payment.completed' ||
+    statusRaw === 'completed' ||
+    statusRaw === 'success' ||
+    statusRaw === 'paid';
   const failed =
-    ['fail', 'failed', 'cancelled', 'canceled', 'declined', 'error', 'payment.failed'].some((s) =>
-      statusRaw.includes(s)
-    );
+    eventName === 'payment.failed' ||
+    eventName === 'payment.cancelled' ||
+    eventName === 'payment.expired' ||
+    ['failed', 'cancelled', 'canceled', 'expired', 'declined'].includes(statusRaw);
 
   const externalReference =
-    b.reference ||
-    b.external_reference ||
     b.transaction_id ||
-    b.transactionId ||
-    b.id ||
-    b.payment_reference ||
+    data.transaction_id ||
+    b.merchant_reference ||
+    data.reference ||
+    b.reference ||
     null;
 
-  const paymentId =
-    b.paymentId ||
-    b.payment_id ||
-    (b.metadata && (b.metadata.paymentId || b.metadata.payment_id)) ||
-    b.customer_reference ||
-    null;
-
-  const amount = b.amount != null ? Number(b.amount) : null;
+  const merchantRef = b.merchant_reference || data.merchant_reference || null;
+  const paymentIdMeta = (b.metadata && b.metadata.paymentId) || (data.metadata && data.metadata.paymentId) || null;
 
   return {
     success,
     failed,
     externalReference: externalReference != null ? String(externalReference) : null,
-    paymentId: paymentId != null && !Number.isNaN(Number(paymentId)) ? Number(paymentId) : null,
-    amount,
+    merchantReference: merchantRef != null ? String(merchantRef) : null,
+    paymentId: paymentIdMeta != null && !Number.isNaN(Number(paymentIdMeta)) ? Number(paymentIdMeta) : null,
+    amount: data.amount != null ? Number(data.amount) : b.amount != null ? Number(b.amount) : null,
     rawStatus: statusRaw,
-    provider: b.provider || 'paygrid'
+    eventId: b.event_id || null,
+    provider: 'paygrid'
   };
 }
 
-/**
- * Resolve payment_transactions row from webhook data.
- */
 async function findPaymentFromWebhook(event) {
   if (event.paymentId) {
-    const rows = await db.query('SELECT * FROM payment_transactions WHERE id = ? LIMIT 1', [
-      event.paymentId
-    ]);
+    const rows = await db.query('SELECT * FROM payment_transactions WHERE id = ? LIMIT 1', [event.paymentId]);
     if (rows.length) return rows[0];
   }
-  if (event.externalReference) {
+  // Prefer merchant_reference (our ZENJIGO-TOPUP-...) then transaction_id
+  for (const ref of [event.merchantReference, event.externalReference]) {
+    if (!ref) continue;
     const rows = await db.query(
       'SELECT * FROM payment_transactions WHERE external_reference = ? ORDER BY id DESC LIMIT 1',
-      [event.externalReference]
+      [ref]
     );
     if (rows.length) return rows[0];
   }
