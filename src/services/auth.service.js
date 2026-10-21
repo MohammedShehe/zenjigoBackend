@@ -21,21 +21,81 @@ function maskEmail(email) {
   return `${local.slice(0, 2)}${'*'.repeat(Math.max(2, local.length - 2))}${domain}`;
 }
 
-/** OTP always sent to email. Phone optional for identity lookup. */
-async function sendOtp({ phone, email, purpose = 'login' }) {
+/**
+ * OTP is always delivered by email.
+ * IMPORTANT: when phone is provided for login, look up the user by (role + phone)
+ * so a shared phone number never routes the code to another role (e.g. admin).
+ * The code is sent to the account's registered email; if the client also sends
+ * an email it must match that account.
+ */
+async function sendOtp({ phone, email, purpose = 'login', role = null }) {
   const mail = String(email || '').trim().toLowerCase();
   if (!mail || !mail.includes('@')) {
     throw ApiError.badRequest('A valid email address is required. OTP is delivered by email only.');
   }
-  if (phone) {
-    const targetPhone = normalizePhone(phone);
-    const rows = await db.query('SELECT email FROM users WHERE phone=? LIMIT 1', [targetPhone]);
-    if (rows.length && rows[0].email) {
-      const registered = String(rows[0].email).trim().toLowerCase();
-      await otp.send({ target: registered, purpose, channel: 'email' });
-      return { target: registered, maskedEmail: maskEmail(registered) };
+
+  // Infer role from purpose / explicit role (set by auth routes)
+  const resolvedRole =
+    role ||
+    (purpose === 'driver_registration' ? 'driver' : null) ||
+    (purpose === 'admin_login' ? 'admin' : null);
+
+  // Login flows: resolve the account in a role-safe way, then email THAT account only
+  if (purpose === 'login' || purpose === 'admin_login') {
+    let user = null;
+    const targetPhone = phone ? normalizePhone(phone) : null;
+
+    if (resolvedRole && targetPhone) {
+      const rows = await db.query(
+        'SELECT id, email, phone, role FROM users WHERE role = ? AND phone = ? LIMIT 1',
+        [resolvedRole, targetPhone]
+      );
+      user = rows[0] || null;
     }
+
+    // Fallback: look up by role + email
+    if (!user && resolvedRole && mail) {
+      const rows = await db.query(
+        'SELECT id, email, phone, role FROM users WHERE role = ? AND email = ? LIMIT 1',
+        [resolvedRole, mail]
+      );
+      user = rows[0] || null;
+    }
+
+    // Last resort without role (legacy): match email exactly, never bare phone across roles
+    if (!user && mail) {
+      const rows = await db.query(
+        'SELECT id, email, phone, role FROM users WHERE email = ? LIMIT 1',
+        [mail]
+      );
+      user = rows[0] || null;
+    }
+
+    if (!user) {
+      throw ApiError.notFound(
+        resolvedRole
+          ? `No ${resolvedRole} account found for these credentials.`
+          : 'No account found for these credentials.'
+      );
+    }
+
+    const registered = String(user.email || '').trim().toLowerCase();
+    if (!registered) {
+      throw ApiError.badRequest('This account has no email on file. Contact support.');
+    }
+
+    // If the client supplied an email, it must match the account (prevents sending codes to the wrong inbox)
+    if (mail && mail !== registered) {
+      throw ApiError.badRequest(
+        'The email you entered does not match the email registered for this phone number.'
+      );
+    }
+
+    await otp.send({ target: registered, purpose, channel: 'email' });
+    return { target: registered, maskedEmail: maskEmail(registered) };
   }
+
+  // Registration / other purposes: deliver to the email the user typed in
   await otp.send({ target: mail, purpose, channel: 'email' });
   return { target: mail, maskedEmail: maskEmail(mail) };
 }

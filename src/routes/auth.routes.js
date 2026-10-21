@@ -7,7 +7,11 @@ const { otpLimiter } = require('../middleware/rateLimit');
 router.post('/rider/send-otp', otpLimiter, [
   body('phone').isString().notEmpty(),
   body('email').isEmail().withMessage('A valid email is required for OTP delivery')
-], validate, c.sendOtp);
+], validate, (req, res, next) => {
+  req.body.role = 'rider';
+  req.body.purpose = req.body.purpose || 'login';
+  return c.sendOtp(req, res, next);
+});
 
 router.post('/rider/verify-otp', [
   body('phone').notEmpty(), body('email').isEmail(),
@@ -18,7 +22,11 @@ router.post('/driver/send-otp', otpLimiter, [
   body('phone').optional().isString(),
   body('email').isEmail().withMessage('A valid email is required for OTP delivery'),
   body('purpose').optional().isIn(['login', 'driver_registration'])
-], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'login'; c.sendOtp(req, res, next); });
+], validate, (req, res, next) => {
+  req.body.role = 'driver';
+  req.body.purpose = req.body.purpose || 'login';
+  return c.sendOtp(req, res, next);
+});
 
 router.post('/driver/send-email-otp', otpLimiter, [
   body('email').isEmail(), body('purpose').optional().isIn(['driver_registration'])
