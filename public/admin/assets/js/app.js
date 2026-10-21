@@ -498,7 +498,7 @@ window.AdminPages = {
     return `<div class="card-x p-4">
       <h6>Platform settings</h6>
       <p class="text-muted small">Stored in MySQL <code>app_settings</code>. Values below are live from the API.</p>
-      <pre class="bg-light p-3 rounded small" style="max-height:400px;overflow:auto">${esc(JSON.stringify(D.settings || {}, null, 2))}</pre>
+      <pre class="settings-json-preview p-3 rounded small" style="max-height:400px;overflow:auto">${esc(JSON.stringify(D.settings || {}, null, 2))}</pre>
       <div class="mt-3">
         <label class="form-label">API base URL (saved in browser)</label>
         <div class="input-group" style="max-width:480px">
