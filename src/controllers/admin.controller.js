@@ -2,6 +2,7 @@ const db = require('../config/db');
 const config = require('../config/env');
 const { hashPassword } = require('../utils/hash');
 const ApiError = require('../utils/ApiError');
+const archiveService = require('../services/archive.service');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyUser } = require('../services/notification.service');
@@ -89,22 +90,26 @@ exports.deleteRider = asyncHandler(async (req, res) => {
   const id = req.params.id;
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='rider'`, [id]);
   if (!existing.length) throw ApiError.notFound('Rider not found');
-  // Soft-delete by suspending; hard delete can cascade
-  await db.query(`UPDATE users SET status='suspended' WHERE id=?`, [id]);
-  await audit(req.user.sub, 'delete_rider', 'user', id);
-  ok(res, null, 'Rider deactivated');
+  const reason = (req.body && (req.body.reason || req.body.archiveReason)) || 'Archived by admin';
+  const result = await archiveService.archiveUser(id, req.user.sub, reason);
+  await audit(req.user.sub, 'archive_rider', 'user', id, { archiveId: result.archiveId, reason });
+  ok(res, result, 'Rider archived');
 });
 
 /* -------------------- Drivers -------------------- */
 exports.drivers = asyncHandler(async (req, res) => {
   const rows = await db.query(`
     SELECT u.id, u.full_name fullName, u.phone, u.email, u.status, u.created_at createdAt,
-           d.driver_code driverCode, d.application_status applicationStatus, d.online,
-           d.rating, d.total_rides totalRides, d.total_earnings totalEarnings,
-           v.type vehicleType, v.plate_number plateNumber, v.make, v.model, v.color
+           d.driver_code driverCode, d.application_status applicationStatus, d.rejection_reason rejectionReason,
+           d.online, d.rating, d.total_rides totalRides, d.total_earnings totalEarnings, d.approved_at approvedAt,
+           d.national_id nationalId, d.home_address homeAddress,
+           v.type vehicleType, v.plate_number plateNumber, v.make, v.model, v.color, v.model_year year
     FROM users u
     JOIN driver_profiles d ON d.user_id=u.id
-    LEFT JOIN vehicles v ON v.driver_id=u.id AND v.status='active'
+    LEFT JOIN vehicles v ON v.id = (
+      SELECT id FROM vehicles WHERE driver_id = u.id
+      ORDER BY (status = 'active') DESC, id DESC LIMIT 1
+    )
     WHERE u.role='driver'
     ORDER BY u.id DESC LIMIT 1000`);
   ok(res, rows);
@@ -112,14 +117,25 @@ exports.drivers = asyncHandler(async (req, res) => {
 
 exports.driver = asyncHandler(async (req, res) => {
   const u = await db.query(`
-    SELECT u.*, d.*, v.type vehicleType, v.plate_number plateNumber, v.make, v.model, v.color, v.model_year year
+    SELECT u.id, u.full_name, u.phone, u.email, u.status, u.photo_url, u.created_at, u.updated_at,
+           d.driver_code, d.national_id, d.home_address, d.application_status, d.rejection_reason,
+           d.online, d.approved_at, d.rating, d.total_rides, d.total_earnings,
+           v.id vehicle_id, v.type vehicleType, v.plate_number plateNumber,
+           v.make, v.model, v.color, v.model_year year, v.status vehicleStatus
     FROM users u
     JOIN driver_profiles d ON d.user_id=u.id
-    LEFT JOIN vehicles v ON v.driver_id=u.id AND v.status='active'
+    LEFT JOIN vehicles v ON v.id = (
+      SELECT id FROM vehicles WHERE driver_id = u.id
+      ORDER BY (status = 'active') DESC, id DESC LIMIT 1
+    )
     WHERE u.id=? AND u.role='driver'`, [req.params.id]);
   if (!u.length) throw ApiError.notFound('Driver not found');
   const docs = await db.query('SELECT * FROM driver_documents WHERE driver_id=? ORDER BY id DESC', [req.params.id]);
-  ok(res, { profile: u[0], documents: docs });
+  const vehicles = await db.query(
+    'SELECT id, type, plate_number plateNumber, make, model, color, model_year year, status FROM vehicles WHERE driver_id=? ORDER BY id DESC',
+    [req.params.id]
+  );
+  ok(res, { profile: u[0], documents: docs, vehicles });
 });
 
 exports.createDriver = asyncHandler(async (req, res) => {
@@ -160,20 +176,41 @@ exports.updateDriver = asyncHandler(async (req, res) => {
        status=COALESCE(?,status) WHERE id=?`,
       [b.fullName || null, b.phone || null, b.email || null, b.status || null, id]
     );
-    if (b.applicationStatus) {
-      await conn.query(`UPDATE driver_profiles SET application_status=? WHERE user_id=?`, [b.applicationStatus, id]);
+    // Profile fields from registration
+    if (b.applicationStatus || b.nationalId || b.homeAddress !== undefined) {
+      await conn.query(
+        `UPDATE driver_profiles SET
+           application_status=COALESCE(?,application_status),
+           national_id=COALESCE(?,national_id),
+           home_address=COALESCE(?,home_address)
+         WHERE user_id=?`,
+        [b.applicationStatus || null, b.nationalId || null, b.homeAddress !== undefined ? (b.homeAddress || null) : null, id]
+      );
     }
-    if (b.vehicleType || b.plateNumber || b.plate || b.make || b.vehicle) {
-      const [veh] = await conn.query(`SELECT id FROM vehicles WHERE driver_id=? AND status='active' LIMIT 1`, [id]);
+    if (b.vehicleType || b.plateNumber || b.plate || b.make || b.vehicleMake || b.vehicle || b.model || b.vehicleModel || b.color || b.vehicleColor || b.year || b.modelYear) {
+      const [veh] = await conn.query(
+        `SELECT id FROM vehicles WHERE driver_id=? ORDER BY (status='active') DESC, id DESC LIMIT 1`,
+        [id]
+      );
+      const type = (b.vehicleType || b.type || null) ? String(b.vehicleType || b.type).toLowerCase() : null;
+      const plate = b.plateNumber || b.plate || null;
+      const make = b.make || b.vehicleMake || b.vehicle || null;
+      const model = b.model || b.vehicleModel || null;
+      const color = b.color || b.vehicleColor || null;
+      const year = b.year != null ? b.year : (b.modelYear != null ? b.modelYear : null);
       if (veh.length) {
         await conn.query(
-          `UPDATE vehicles SET type=COALESCE(?,type), plate_number=COALESCE(?,plate_number), make=COALESCE(?,make), model=COALESCE(?,model), color=COALESCE(?,color) WHERE id=?`,
-          [(b.vehicleType || b.type || null)?.toLowerCase() || null, b.plateNumber || b.plate || null, b.make || b.vehicle || null, b.model || null, b.color || null, veh[0].id]
+          `UPDATE vehicles SET
+             type=COALESCE(?,type), plate_number=COALESCE(?,plate_number),
+             make=COALESCE(?,make), model=COALESCE(?,model), color=COALESCE(?,color),
+             model_year=COALESCE(?,model_year)
+           WHERE id=?`,
+          [type, plate, make, model, color, year, veh[0].id]
         );
       } else {
         await conn.query(
-          'INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,status) VALUES(?,?,?,?,?,?,?)',
-          [id, (b.vehicleType || b.type || 'taxi').toLowerCase(), b.plateNumber || b.plate || null, b.make || b.vehicle || null, b.model || null, b.color || null, 'active']
+          'INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,model_year,status) VALUES(?,?,?,?,?,?,?,?)',
+          [id, type || 'taxi', plate || `TMP-${id}`, make, model, color, year, 'active']
         );
       }
     }
@@ -184,43 +221,75 @@ exports.updateDriver = asyncHandler(async (req, res) => {
 
 exports.driverStatus = asyncHandler(async (req, res) => {
   const status = req.body.status;
+  const reason = (req.body.reason || req.body.rejectionReason || '').trim();
   const allowed = ['under_review', 'approved', 'active', 'rejected', 'suspended'];
   if (!allowed.includes(status)) throw ApiError.badRequest('Invalid status');
   const id = req.params.id;
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='driver'`, [id]);
   if (!existing.length) throw ApiError.notFound('Driver not found');
 
+  if ((status === 'rejected' || status === 'suspended') && !reason) {
+    throw ApiError.badRequest('A rejection/suspension reason is required.');
+  }
+
   let appStatus = status;
   let userStatus = 'active';
   if (status === 'rejected' || status === 'suspended') userStatus = 'suspended';
   if (status === 'approved') appStatus = 'active';
   if (status === 'under_review') userStatus = 'pending';
+  if (appStatus === 'suspended') appStatus = 'rejected';
 
-  await db.query(`UPDATE driver_profiles SET application_status=? WHERE user_id=?`, [appStatus === 'suspended' ? 'rejected' : appStatus, id]);
+  // Persist rejection_reason so the driver can see why they were rejected/suspended.
+  // Clear the reason when approving/activating.
+  const rejectionReason = (status === 'rejected' || status === 'suspended') ? reason : null;
+  const approvedAt = (appStatus === 'active') ? new Date() : null;
+
+  await db.query(
+    `UPDATE driver_profiles
+     SET application_status=?,
+         rejection_reason=?,
+         approved_at=COALESCE(?, approved_at),
+         online=CASE WHEN ? IN ('rejected','suspended') THEN 0 ELSE online END
+     WHERE user_id=?`,
+    [appStatus, rejectionReason, approvedAt, status, id]
+  );
   await db.query(`UPDATE users SET status=? WHERE id=?`, [userStatus, id]);
-  await audit(req.user.sub, 'driver_status', 'user', id, { status, reason: req.body.reason });
-  try { await notifyUser(id, 'Driver application update', `Your application status is now: ${status}`, { type: 'driver_status' }); } catch (_) {}
-  ok(res, null, 'Driver status updated');
+  await audit(req.user.sub, 'driver_status', 'user', id, { status, reason: rejectionReason });
+
+  const msg = status === 'rejected' || status === 'suspended'
+    ? `Your application was ${status}. Reason: ${reason}`
+    : `Your application status is now: ${appStatus}`;
+  try { await notifyUser(id, 'Driver application update', msg, { type: 'driver_status', status: appStatus, reason: rejectionReason }); } catch (_) {}
+  ok(res, { applicationStatus: appStatus, rejectionReason }, 'Driver status updated');
 });
 
 exports.deleteDriver = asyncHandler(async (req, res) => {
   const id = req.params.id;
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='driver'`, [id]);
   if (!existing.length) throw ApiError.notFound('Driver not found');
-  await db.query(`UPDATE users SET status='suspended' WHERE id=?`, [id]);
-  await db.query(`UPDATE driver_profiles SET application_status='rejected', online=0 WHERE user_id=?`, [id]);
-  await audit(req.user.sub, 'delete_driver', 'user', id);
-  ok(res, null, 'Driver deactivated');
+  const reason = (req.body && (req.body.reason || req.body.archiveReason)) || 'Archived by admin';
+  const result = await archiveService.archiveUser(id, req.user.sub, reason);
+  await audit(req.user.sub, 'archive_driver', 'user', id, { archiveId: result.archiveId, reason });
+  ok(res, result, 'Driver archived');
 });
 
 exports.documentStatus = asyncHandler(async (req, res) => {
   const status = req.body.status;
+  const reason = (req.body.reason || req.body.rejectionReason || '').trim();
   if (!['approved', 'rejected', 'pending'].includes(status)) throw ApiError.badRequest('Invalid status');
-  const r = await db.query(`UPDATE driver_documents SET status=?, reviewed_at=UTC_TIMESTAMP(), reviewed_by=? WHERE id=?`,
-    [status, req.user.sub, req.params.id]);
+  if (status === 'rejected' && !reason) {
+    throw ApiError.badRequest('A rejection reason is required when rejecting a document.');
+  }
+  const rejectionReason = status === 'rejected' ? reason : null;
+  const r = await db.query(
+    `UPDATE driver_documents
+     SET status=?, rejection_reason=?, reviewed_at=UTC_TIMESTAMP(), reviewed_by=?
+     WHERE id=?`,
+    [status, rejectionReason, req.user.sub, req.params.id]
+  );
   if (r.affectedRows === 0) throw ApiError.notFound('Document not found');
-  await audit(req.user.sub, 'document_status', 'driver_document', req.params.id, { status });
-  ok(res, null, 'Document status updated');
+  await audit(req.user.sub, 'document_status', 'driver_document', req.params.id, { status, reason: rejectionReason });
+  ok(res, { status, rejectionReason }, 'Document status updated');
 });
 
 /* -------------------- Admins / Sub-admins -------------------- */
@@ -270,18 +339,19 @@ exports.updateAdmin = asyncHandler(async (req, res) => {
   if (!fields.length) throw ApiError.badRequest('Nothing to update');
   params.push(id);
   await db.query(`UPDATE users SET ${fields.join(',')} WHERE id=?`, params);
-  await audit(req.user.sub, 'update_admin', 'user', id, { ...b, password: b.password ? '[changed]' : undefined });
+  await audit(req.user.sub, 'update_admin', 'user', id, b);
   ok(res, null, 'Admin updated');
 });
 
 exports.deleteAdmin = asyncHandler(async (req, res) => {
   const id = req.params.id;
-  if (Number(id) === Number(req.user.sub)) throw ApiError.badRequest('You cannot delete your own account');
+  if (String(id) === String(req.user.sub)) throw ApiError.badRequest('You cannot archive your own admin account.');
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='admin'`, [id]);
   if (!existing.length) throw ApiError.notFound('Admin not found');
-  await db.query(`UPDATE users SET status='suspended' WHERE id=?`, [id]);
-  await audit(req.user.sub, 'delete_admin', 'user', id);
-  ok(res, null, 'Admin deactivated');
+  const reason = (req.body && (req.body.reason || req.body.archiveReason)) || 'Archived by admin';
+  const result = await archiveService.archiveUser(id, req.user.sub, reason);
+  await audit(req.user.sub, 'archive_admin', 'user', id, { archiveId: result.archiveId, reason });
+  ok(res, result, 'Admin archived');
 });
 
 /* -------------------- Rides -------------------- */
@@ -622,4 +692,29 @@ exports.audit = asyncHandler(async (req, res) => {
     LEFT JOIN users u ON u.id=a.admin_id
     ORDER BY a.id DESC LIMIT 1000`);
   ok(res, rows);
+});
+
+
+/* -------------------- Archive -------------------- */
+exports.archives = asyncHandler(async (req, res) => {
+  const rows = await archiveService.listArchives({ role: req.query.role || null, limit: req.query.limit });
+  ok(res, rows);
+});
+
+exports.archive = asyncHandler(async (req, res) => {
+  const row = await archiveService.getArchive(req.params.id);
+  // Do not dump full snapshot to list clients unless detail requested
+  ok(res, row);
+});
+
+exports.restoreArchive = asyncHandler(async (req, res) => {
+  const result = await archiveService.restoreUser(req.params.id);
+  await audit(req.user.sub, 'restore_user', 'user_archive', req.params.id, result);
+  ok(res, result, 'User restored from archive');
+});
+
+exports.permanentDeleteArchive = asyncHandler(async (req, res) => {
+  const result = await archiveService.permanentDelete(req.params.id);
+  await audit(req.user.sub, 'permanent_delete_user', 'user_archive', req.params.id, result);
+  ok(res, result, 'Archived user permanently deleted');
 });

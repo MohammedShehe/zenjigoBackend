@@ -77,4 +77,10 @@ router.get('/settings', c.settings);
 router.patch('/settings/:key', c.updateSetting);
 router.get('/audit-logs', c.audit);
 
+// Archive
+router.get('/archives', c.archives);
+router.get('/archives/:id', c.archive);
+router.post('/archives/:id/restore', c.restoreArchive);
+router.delete('/archives/:id', c.permanentDeleteArchive);
+
 module.exports = router;

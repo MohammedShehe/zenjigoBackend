@@ -2,31 +2,89 @@ const db=require('../config/db'); const ApiError=require('../utils/ApiError'); c
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
  // Accept both historical multipart field names so older clients remain compatible.
- files = { ...(files || {}), nationalId: (files?.nationalId?.length ? files.nationalId : files?.nationalIdFile?.length ? files.nationalIdFile : []) };
+ // Normalize to a clean map of document-type keys only (avoid double-uploading nationalIdFile as vehicle_photo).
+ const incoming = files || {};
+ const normalizedFiles = {
+   license: incoming.license || [],
+   nationalId: (incoming.nationalId && incoming.nationalId.length)
+     ? incoming.nationalId
+     : (incoming.nationalIdFile && incoming.nationalIdFile.length ? incoming.nationalIdFile : []),
+   insurance: incoming.insurance || [],
+   driverPhoto: incoming.driverPhoto || [],
+   vehiclePhotos: incoming.vehiclePhotos || []
+ };
+ files = normalizedFiles;
+
  const phone=normalizePhone(data.phone);
  const emailTarget=String(data.email||'').trim().toLowerCase();
  if(!emailTarget||!emailTarget.includes('@')) throw ApiError.badRequest('A valid email is required.');
  if(data.emailOtpCode) await otp.verify({target:emailTarget,code:data.emailOtpCode,purpose:'driver_registration'});
  else throw ApiError.badRequest('emailOtpCode is required for driver registration.');
  if(!data.fullName||!data.email||!data.nationalId)throw ApiError.badRequest('fullName, phone, email and nationalId are required.');
- if(!files?.license?.[0] || !files?.nationalId?.[0] || !files?.insurance?.[0] || !files?.driverPhoto?.[0]) throw ApiError.badRequest('License, national ID, insurance and driver photo are required.');
- const existing=await db.query("SELECT id FROM users WHERE role='driver' AND (phone=? OR email=?)",[phone,emailTarget]); if(existing.length)throw ApiError.conflict('A user already exists with this phone or email.');
- const result=await db.transaction(async conn=>{
-  const [r]=await conn.query('INSERT INTO users(role,full_name,phone,email,status) VALUES("driver",?,?,?,"pending")',[data.fullName,phone,data.email.toLowerCase()]);
-  const id=r.insertId; await conn.query('INSERT INTO driver_profiles(user_id,driver_code,national_id,home_address) VALUES(?,?,?,?)',[id,code(id),data.nationalId,data.homeAddress||null]);
-  await conn.query('INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,model_year) VALUES(?,?,?,?,?,?,?)',[id,data.vehicleType,data.plateNumber,data.vehicleMake||null,data.vehicleModel||null,data.vehicleColor||null,data.modelYear||null]);
-  return id;
- });
- const fileList=[];
- for(const [key,val] of Object.entries(files||{})){
-   for(const f of (Array.isArray(val)?val:[val])){
-     const type=key==='license'?'drivers_license':key==='nationalId'?'national_id':key==='insurance'?'insurance':key==='driverPhoto'?'driver_photo':'vehicle_photo';
-     const u=await upload(f,`${config.cloudinary.folder}/drivers/${result}`);
-     await db.query('INSERT INTO driver_documents(driver_id,document_type,public_id,url,resource_type) VALUES(?,?,?,?,?)',[result,type,u.publicId,u.url,u.resourceType]);
-     fileList.push({type,url:u.url});
+ if(!files?.license?.[0] || !files?.nationalId?.[0] || !files?.insurance?.[0] || !files?.driverPhoto?.[0]) {
+   throw ApiError.badRequest('License, national ID, insurance and driver photo are required.');
+ }
+ const existing=await db.query("SELECT id FROM users WHERE role='driver' AND (phone=? OR email=?)",[phone,emailTarget]);
+ if(existing.length) throw ApiError.conflict('A user already exists with this phone or email.');
+
+ // CRITICAL FIX: Upload ALL documents to Cloudinary FIRST.
+ // Only create the driver in the database after every file succeeds.
+ // Previously the user was inserted first, so a Cloudinary failure left an orphan driver with no documents.
+ const typeMap = {
+   license: 'drivers_license',
+   nationalId: 'national_id',
+   insurance: 'insurance',
+   driverPhoto: 'driver_photo',
+   vehiclePhotos: 'vehicle_photo'
+ };
+ const uploaded = [];
+ const folderBase = `${config.cloudinary.folder}/drivers`;
+ for (const [key, val] of Object.entries(files)) {
+   const list = Array.isArray(val) ? val : (val ? [val] : []);
+   for (const f of list) {
+     if (!f || !f.buffer) continue;
+     const docType = typeMap[key] || 'other';
+     // Use a temporary subfolder; we will rewrite public_id path conceptually via folder after we know id
+     // Using a shared pending folder is fine; Cloudinary folder is just organization.
+     const u = await upload(f, `${folderBase}/pending`);
+     uploaded.push({ type: docType, publicId: u.publicId, url: u.url, resourceType: u.resourceType });
    }
  }
- return {driverId:result,driverCode:code(result),documents:fileList,status:'pending'};
+ if (uploaded.length < 4) {
+   throw ApiError.badRequest('License, national ID, insurance and driver photo must all upload successfully.');
+ }
+
+ // All uploads succeeded — now create the driver + document rows in one transaction.
+ const result = await db.transaction(async conn => {
+   const [r] = await conn.query(
+     'INSERT INTO users(role,full_name,phone,email,status) VALUES("driver",?,?,?,"pending")',
+     [data.fullName, phone, data.email.toLowerCase()]
+   );
+   const id = r.insertId;
+   await conn.query(
+     'INSERT INTO driver_profiles(user_id,driver_code,national_id,home_address,application_status) VALUES(?,?,?,?,"pending")',
+     [id, code(id), data.nationalId, data.homeAddress || null]
+   );
+   await conn.query(
+     'INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,model_year) VALUES(?,?,?,?,?,?,?)',
+     [id, data.vehicleType, data.plateNumber, data.vehicleMake || null, data.vehicleModel || null, data.vehicleColor || null, data.modelYear || null]
+   );
+   for (const u of uploaded) {
+     await conn.query(
+       'INSERT INTO driver_documents(driver_id,document_type,public_id,url,resource_type,status) VALUES(?,?,?,?,?,"pending")',
+       [id, u.type, u.publicId, u.url, u.resourceType]
+     );
+   }
+   return id;
+ });
+
+ return {
+   driverId: result,
+   driverCode: code(result),
+   documents: uploaded.map(u => ({ type: u.type, url: u.url })),
+   status: 'pending',
+   applicationStatus: 'pending'
+ };
 }
 async function profile(id){
  const rows=await db.query(`SELECT u.id,u.full_name,u.phone,u.email,u.photo_url,u.status,d.*,v.id vehicle_id,v.type vehicle_type,v.plate_number,v.make,v.model,v.color,v.model_year FROM users u JOIN driver_profiles d ON d.user_id=u.id LEFT JOIN vehicles v ON v.driver_id=u.id AND v.status='active' WHERE u.id=?`,[id]); if(!rows.length)throw ApiError.notFound('Driver not found');
