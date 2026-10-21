@@ -139,9 +139,14 @@ app.use(cors(corsOptions));
 
 app.use(compression());
 
+// Capture raw body for payment webhook HMAC verification
 app.use(
   express.json({
     limit: '2mb',
+    verify: (req, res, buf) => {
+      // Always keep a copy; payment routes use it for signature checks
+      req.rawBody = buf;
+    },
   })
 );
 
