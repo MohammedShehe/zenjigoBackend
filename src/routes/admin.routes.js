@@ -67,6 +67,7 @@ router.get('/parcels', c.parcels);
 // Notifications
 router.get('/notifications', c.notifications);
 router.post('/notifications', c.sendNotification);
+router.patch('/notifications/:id/read', c.markNotificationRead);
 
 // Conversations
 router.get('/conversations', c.conversations);

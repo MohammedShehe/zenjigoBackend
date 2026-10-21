@@ -132,6 +132,7 @@ async function syncAll() {
     D.tours = (tours || []).map(mapTour);
     D.parcels = (parcels || []).map(mapParcel);
     D.notifications = notifications || [];
+    updateIndicators();
     D.conversations = conversations || [];
     D.audit = audit || [];
     D.commissions = commissions || [];
@@ -218,6 +219,12 @@ function mapParcel(p) {
   };
 }
 
+function updateIndicators() {
+  const counts = { live: (D.rides || []).filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).length, drivers: (D.drivers || []).filter(d => /pending|review/i.test(d.status || '')).length, withdrawals: (D.payouts || []).filter(p => /pending/i.test(p.status || '')).length, chat: (D.conversations || []).filter(c => Number(c.unreadCount || c.unread_count || 0) > 0).length, reports: (D.rides || []).filter(r => /cancel|failed|incident|dispute/i.test(r.status || '')).length, notifications: (D.notifications || []).length };
+  Object.entries(counts).forEach(([page, count]) => { const link = document.querySelector(`.nav-link[data-page="${page}"]`); if (!link) return; let badgeEl = link.querySelector('.nav-badge'); if (count > 0) { if (!badgeEl) { badgeEl = document.createElement('em'); badgeEl.className = 'nav-badge'; link.appendChild(badgeEl); } badgeEl.textContent = count > 99 ? '99+' : String(count); } else if (badgeEl) badgeEl.remove(); });
+  const bell = document.querySelector('.notification-btn span'); if (bell) { const unread = (D.notifications || []).filter(n => !(n.read_at || n.readAt)).length; bell.textContent = unread > 0 ? (unread > 99 ? '99+' : String(unread)) : ''; bell.classList.toggle('has-count', unread > 0); bell.setAttribute('aria-label', `${unread} notifications`); }
+}
+
 /* ---------- Navigation ---------- */
 let currentPage = 'dashboard';
 
@@ -236,7 +243,9 @@ const PAGE_META = {
   chat: ['Support', 'Conversations and support threads'],
   audit: ['Audit log', 'Administrative actions trail'],
   pricing: ['Pricing & commission', 'Fare and commission configuration'],
-  settings: ['Settings', 'Platform configuration']
+  settings: ['Settings', 'Platform configuration'],
+  live: ['Live Operations', 'Current rides, drivers and operational activity'],
+  reports: ['Reports & Safety', 'Review operational activity and safety indicators']
 };
 
 function renderPage(page) {
@@ -249,6 +258,7 @@ function renderPage(page) {
   if (!content) return;
   const fn = window.AdminPages?.[page];
   content.innerHTML = fn ? fn() : `<div class="card-x p-4"><p>Page not available.</p></div>`;
+  updateIndicators();
   bindPageEvents();
 }
 window.renderPage = renderPage;
@@ -280,6 +290,15 @@ function toolbar(searchId, extra = '') {
 
 /* ---------- Pages ---------- */
 window.AdminPages = {
+  live() {
+    return toolbar('liveSearch', '<button class="btn btn-outline-primary" id="btnRefreshLive"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>') + tableWrap('Live ride operations', '', '<th>Ride</th><th>Rider</th><th>Driver</th><th>Route</th><th>Status</th><th>Started</th>', D.rides.filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).map(r => `<tr data-search="${esc((r.id+' '+r.rider+' '+r.driver+' '+r.from+' '+r.to+' '+r.status).toLowerCase())}"><td><b>${esc(r.id)}</b></td><td>${esc(r.rider)}</td><td>${esc(r.driver)}</td><td>${esc(r.from)} → ${esc(r.to)}</td><td>${badge(r.status)}</td><td>${esc(r.time)}</td></tr>`).join(''), 'No active rides right now.');
+  },
+  reports() {
+    const active = D.rides.filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).length;
+    const pending = D.drivers.filter(d => /pending|review/i.test(d.status || '')).length;
+    const suspended = D.riders.filter(r => /suspended|restricted/i.test(r.status || '')).length + D.drivers.filter(d => /suspended|rejected/i.test(d.status || '')).length;
+    return `<div class="row g-3 mb-3"><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Active rides</small><h3>${active}</h3></div></div><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Driver applications to review</small><h3>${pending}</h3></div></div><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Restricted accounts</small><h3>${suspended}</h3></div></div></div>` + toolbar('reportsSearch') + tableWrap('Safety and operational review', '', '<th>Category</th><th>Reference</th><th>Person / detail</th><th>Status</th><th>Time</th>', [...D.drivers.filter(d => /pending|review|suspended|rejected/i.test(d.status || '')).map(d => ({category:'Driver review',id:d.id,name:d.name,status:d.status,time:'—'})), ...D.rides.filter(r => /cancel|failed|incident|dispute/i.test(r.status || '')).map(r => ({category:'Ride follow-up',id:r.id,name:(r.rider+' / '+r.driver),status:r.status,time:r.time}))].map(x => `<tr data-search="${esc((x.category+' '+x.id+' '+x.name+' '+x.status).toLowerCase())}"><td>${esc(x.category)}</td><td>${esc(x.id)}</td><td>${esc(x.name)}</td><td>${badge(x.status)}</td><td>${esc(x.time)}</td></tr>`).join(''), 'No review items found in the currently available records.');
+  },
   dashboard() {
     const d = D.dashboard || {};
     const cards = [
@@ -434,7 +453,7 @@ window.AdminPages = {
       `<button class="btn btn-sm btn-primary" data-action="send-notification"><i class="bi bi-plus-lg"></i> Send</button>`)
       + tableWrap('Notifications', '',
         '<th>User</th><th>Title</th><th>Body</th><th>Type</th><th>Time</th>',
-        (D.notifications || []).map((n) => `<tr>
+        (D.notifications || []).map((n) => `<tr data-search="${esc((n.userName+' '+n.user_id+' '+n.title+' '+n.body+' '+n.type).toLowerCase())}">
           <td>${esc(n.userName || n.user_id)}</td><td>${esc(n.title)}</td>
           <td class="small">${esc(n.body)}</td><td>${esc(n.type)}</td>
           <td class="small">${n.created_at ? new Date(n.created_at).toLocaleString() : '—'}</td>
@@ -444,7 +463,7 @@ window.AdminPages = {
   chat() {
     return tableWrap('Conversations', '',
       '<th>ID</th><th>Type</th><th>Messages</th><th>Updated</th>',
-      (D.conversations || []).map((c) => `<tr>
+      (D.conversations || []).map((c) => `<tr data-search="${esc((c.id+' '+c.type+' '+c.context_type).toLowerCase())}">
         <td>${c.id}</td><td>${esc(c.type || c.context_type || '—')}</td>
         <td>${c.messageCount || 0}</td>
         <td class="small">${c.updated_at ? new Date(c.updated_at).toLocaleString() : '—'}</td>
@@ -504,6 +523,7 @@ function bindPageEvents() {
     };
   });
 
+  $('#btnRefreshLive')?.addEventListener('click', async (e) => { const state = loadBtn(e.currentTarget); try { await syncAll(); renderPage('live'); } finally { state.done(); } });
   $('#btnRefreshRides')?.addEventListener('click', async () => { await syncAll(); renderPage('rides'); toast('Rides refreshed'); });
   $('#btnRefreshDrivers')?.addEventListener('click', async () => { await syncAll(); renderPage('drivers'); toast('Drivers refreshed'); });
   $('#btnRefreshRiders')?.addEventListener('click', async () => { await syncAll(); renderPage('riders'); toast('Riders refreshed'); });
@@ -561,7 +581,7 @@ function initAuthUI() {
         await enterApp();
         toast('Signed in successfully');
       } else {
-        $('#otpEmailLabel') && ($('#otpEmailLabel').textContent = d.maskedPhone || email);
+        $('#otpEmailLabel') && ($('#otpEmailLabel').textContent = d.maskedEmail || email);
         showAuth('otp');
         $('#loginOtpInputs input')?.focus();
         toast('Security OTP sent');
@@ -604,9 +624,10 @@ function initAuthUI() {
   $('#openSidebar')?.addEventListener('click', () => $('#adminApp')?.classList.add('sidebar-open'));
   $('#sidebarBackdrop')?.addEventListener('click', () => $('#adminApp')?.classList.remove('sidebar-open'));
 
-  $('#themeBtn')?.addEventListener('click', () => {
-    document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  });
+  const applyTheme = (theme) => { document.documentElement.dataset.theme = theme; document.documentElement.setAttribute('data-bs-theme', theme); localStorage.setItem('zenjigo-theme', theme); const icon = $('#themeBtn i'); if (icon) icon.className = 'bi ' + (theme === 'dark' ? 'bi-sun' : 'bi-moon-stars'); };
+  applyTheme(localStorage.getItem('zenjigo-theme') || 'light');
+  $('#themeBtn')?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+  $('#globalSearch')?.addEventListener('input', (e) => { const q = e.target.value.toLowerCase().trim(); $$('#content tbody tr').forEach(tr => { const hay = (tr.getAttribute('data-search') || tr.textContent).toLowerCase(); tr.classList.toggle('d-none', Boolean(q) && !hay.includes(q)); }); });
 }
 
 document.addEventListener('DOMContentLoaded', () => {

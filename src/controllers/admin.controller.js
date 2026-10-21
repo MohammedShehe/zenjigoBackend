@@ -561,6 +561,14 @@ exports.notifications = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
+exports.markNotificationRead = asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.badRequest('Invalid notification id');
+  await db.query('UPDATE notifications SET read_at=COALESCE(read_at, UTC_TIMESTAMP()) WHERE id=?', [id]);
+  await audit(req.user.sub, 'mark_notification_read', 'notification', id);
+  ok(res, { id, readAt: new Date().toISOString() }, 'Notification marked as read');
+});
+
 exports.sendNotification = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.title || !b.body) throw ApiError.badRequest('title and body are required');

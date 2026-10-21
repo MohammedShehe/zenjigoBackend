@@ -18,7 +18,11 @@ function select(label, name, options, value = '') {
 }
 function textarea(label, name, value = '', rows = 3) {
   return `<div class="mb-3"><label class="form-label">${esc(label)}</label>
-    <textarea class="form-control" name="${esc(name)}" rows="${rows}">${esc(value)}</textarea></div>`;
+    <textarea class="form-control" name="${esc(name)}" rows="${rows}" required>${esc(value)}</textarea></div>`;
+}
+function userOptions() {
+  const users = [...(D.riders || []).map(u => ({...u, role:'Rider'})), ...(D.drivers || []).map(u => ({...u, role:'Driver'}))];
+  return users.map(u => `<option value="${esc(u.dbId || u.id)}">${esc(u.name || 'Unnamed user')} · ${esc(u.role)} · ${esc(u.phone || 'No phone')} (#${esc(u.dbId || u.id)})</option>`).join('');
 }
 
 function openModal(eyebrow, title, bodyHtml, footerHtml) {
@@ -52,16 +56,8 @@ document.addEventListener('click', async (e) => {
       /* Drivers */
       case 'add-driver': {
         openModal('DRIVER', 'Add driver',
-          `<form id="flowForm">
-            ${input('Full name', 'fullName')}
-            ${input('Phone', 'phone', 'tel')}
-            ${input('Email', 'email', 'email', '', false)}
-            ${select('Vehicle type', 'vehicleType', ['taxi', 'boda', 'bajaji'])}
-            ${input('Plate number', 'plateNumber')}
-            ${input('Make / model', 'make', 'text', '', false)}
-            ${select('Status', 'status', ['under_review', 'active'])}
-          </form>`,
-          `<button class="btn btn-primary" data-flow-submit="create-driver">Create driver</button>`);
+          `<form id="flowForm" class="professional-form"><div class="form-intro"><span class="form-icon"><i class="bi bi-person-vcard"></i></span><div><h6>Driver profile</h6><p>Enter the driver's contact and vehicle information.</p></div></div><div class="row g-3"><div class="col-12 col-md-6">${input('Full name', 'fullName')}</div><div class="col-12 col-md-6">${input('Phone number', 'phone', 'tel', '', true, 'placeholder="+255…"')}</div><div class="col-12 col-md-6">${input('Email address', 'email', 'email', '', false)}</div><div class="col-12 col-md-6">${select('Vehicle type', 'vehicleType', ['taxi', 'boda', 'bajaji'])}</div><div class="col-12 col-md-6">${input('Plate number', 'plateNumber')}</div><div class="col-12 col-md-6">${input('Make / model', 'make', 'text', '', false)}</div><div class="col-12 col-md-6">${select('Application status', 'status', ['under_review', 'active'])}</div></div></form>`,
+          `<button class="btn btn-primary" data-flow-submit="create-driver"><i class="bi bi-check2-circle me-1"></i>Create driver</button>`);
         break;
       }
       case 'edit-driver': {
@@ -265,13 +261,8 @@ document.addEventListener('click', async (e) => {
       /* Notifications */
       case 'send-notification': {
         openModal('NOTIFICATION', 'Send notification',
-          `<form id="flowForm">
-            ${input('User ID', 'userId', 'number')}
-            ${input('Title', 'title')}
-            ${textarea('Body', 'body')}
-            ${input('Type', 'type', 'text', 'admin', false)}
-          </form>`,
-          `<button class="btn btn-primary" data-flow-submit="send-notification">Send</button>`);
+          `<form id="flowForm" class="professional-form notification-form"><div class="form-intro"><span class="form-icon"><i class="bi bi-bell"></i></span><div><h6>Compose a notification</h6><p>Choose a registered driver or rider, then write a clear message.</p></div></div><div class="mb-3"><label class="form-label" for="notificationUser">Recipient</label><select id="notificationUser" class="form-select" name="userId" required><option value="">Select a user…</option>${userOptions()}</select><div class="form-text">${(D.riders || []).length + (D.drivers || []).length} available user records loaded.</div></div>${input('Notification title', 'title')}<div class="mb-3"><label class="form-label">Message</label><textarea class="form-control" name="body" rows="4" maxlength="1000" placeholder="Write a helpful, concise message…" required></textarea><div class="form-text">Keep the message clear and actionable.</div></div>${select('Category', 'type', ['admin', 'system', 'ride', 'payment', 'safety'], 'admin')}</form>`,
+          `<button class="btn btn-primary" data-flow-submit="send-notification"><i class="bi bi-send me-1"></i>Send notification</button>`);
         break;
       }
     }
@@ -292,6 +283,9 @@ document.addEventListener('click', async (e) => {
   const action = btn.dataset.flowSubmit;
   const id = btn.dataset.id;
   btn.disabled = true;
+  btn.classList.add('is-loading');
+  const originalButtonHtml = btn.innerHTML;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Processing…';
 
   try {
     switch (action) {
@@ -405,7 +399,7 @@ document.addEventListener('click', async (e) => {
 
       case 'send-notification':
         await API.post('/admin/notifications', {
-          userId: Number(data.userId), title: data.title, body: data.body, type: data.type || 'admin'
+          userId: Number(data.userId), title: data.title.trim(), body: data.body.trim(), type: data.type || 'admin'
         });
         toast('Notification sent');
         closeModal();
@@ -416,6 +410,8 @@ document.addEventListener('click', async (e) => {
     toast(err.message, 'danger');
   } finally {
     btn.disabled = false;
+    btn.classList.remove('is-loading');
+    btn.innerHTML = originalButtonHtml;
   }
 });
 })();
