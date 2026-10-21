@@ -305,7 +305,7 @@ exports.documentStatus = asyncHandler(async (req, res) => {
   const rejectionReason = status === 'rejected' ? reason : null;
   const r = await db.query(
     `UPDATE driver_documents
-     SET status=?, rejection_reason=?, reviewed_at=UTC_TIMESTAMP(), reviewed_by=?
+     SET status=?, rejection_reason=?, verified_at=UTC_TIMESTAMP(), verified_by=?
      WHERE id=?`,
     [status, rejectionReason, req.user.sub, req.params.id]
   );
@@ -714,6 +714,45 @@ exports.audit = asyncHandler(async (req, res) => {
     LEFT JOIN users u ON u.id=a.admin_id
     ORDER BY a.id DESC LIMIT 1000`);
   ok(res, rows);
+});
+
+/**
+ * Live operations map data: active rides + online drivers with coordinates.
+ */
+exports.liveMap = asyncHandler(async (req, res) => {
+  const rides = await db.query(`
+    SELECT r.id, r.ride_code rideCode, r.ride_type rideType, r.status,
+           r.pickup_address pickupAddress, r.destination_address destinationAddress,
+           r.pickup_lat pickupLat, r.pickup_lng pickupLng,
+           r.destination_lat destinationLat, r.destination_lng destinationLng,
+           r.estimated_fare estimatedFare, r.created_at createdAt,
+           ru.full_name riderName, du.full_name driverName,
+           d.current_lat driverLat, d.current_lng driverLng
+    FROM rides r
+    JOIN users ru ON ru.id = r.rider_id
+    LEFT JOIN users du ON du.id = r.driver_id
+    LEFT JOIN driver_profiles d ON d.user_id = r.driver_id
+    WHERE r.status NOT IN ('completed', 'cancelled')
+    ORDER BY r.id DESC
+    LIMIT 200
+  `);
+
+  const drivers = await db.query(`
+    SELECT d.user_id id, u.full_name fullName, d.current_lat lat, d.current_lng lng,
+           d.online, d.rating, d.location_updated_at locationUpdatedAt,
+           v.type vehicleType, v.plate_number plateNumber
+    FROM driver_profiles d
+    JOIN users u ON u.id = d.user_id AND u.status = 'active'
+    LEFT JOIN vehicles v ON v.driver_id = d.user_id AND v.status = 'active'
+    WHERE d.online = 1
+      AND d.application_status = 'active'
+      AND d.current_lat IS NOT NULL
+      AND d.current_lng IS NOT NULL
+    ORDER BY d.location_updated_at DESC
+    LIMIT 200
+  `);
+
+  ok(res, { rides, drivers, updatedAt: new Date().toISOString() });
 });
 
 
