@@ -142,23 +142,45 @@ exports.createDriver = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.fullName || !b.phone) throw ApiError.badRequest('fullName and phone are required');
   const id = await db.transaction(async (conn) => {
+    const userStatus = (b.status === 'active' || b.applicationStatus === 'active') ? 'active' : 'pending';
     const [u] = await conn.query(
       'INSERT INTO users(role,full_name,phone,email,status) VALUES(?,?,?,?,?)',
-      ['driver', b.fullName, b.phone, b.email || null, b.status === 'active' ? 'active' : 'pending']
+      ['driver', b.fullName, b.phone, b.email || null, userStatus]
     );
-    const code = `DRV${String(u.insertId).padStart(6, '0')}`;
-    const appStatus = b.status === 'active' || b.applicationStatus === 'active' ? 'active' : (b.applicationStatus || 'under_review');
+    const code = `ZG-DRV-${String(u.insertId).padStart(6, '0')}`;
+    const appStatus = b.status === 'active' || b.applicationStatus === 'active'
+      ? 'active'
+      : (b.applicationStatus || b.status || 'under_review');
     await conn.query(
-      'INSERT INTO driver_profiles(user_id,driver_code,application_status) VALUES(?,?,?)',
-      [u.insertId, code, appStatus]
+      'INSERT INTO driver_profiles(user_id,driver_code,national_id,home_address,application_status) VALUES(?,?,?,?,?)',
+      [
+        u.insertId,
+        code,
+        b.nationalId || null,
+        b.homeAddress || null,
+        appStatus
+      ]
     );
-    if (b.vehicleType || b.plateNumber || b.plate) {
-      const plate = b.plateNumber || b.plate || `TMP-${u.insertId}`;
-      await conn.query(
-        'INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,status) VALUES(?,?,?,?,?,?,?)',
-        [u.insertId, (b.vehicleType || b.type || 'taxi').toLowerCase(), plate, b.make || b.vehicle || null, b.model || null, b.color || null, 'active']
-      );
-    }
+    // Always create a vehicle row when admin adds a driver (matches registration fields)
+    const plate = b.plateNumber || b.plate || `TMP-${u.insertId}`;
+    const make = b.make || b.vehicleMake || b.vehicle || null;
+    const model = b.model || b.vehicleModel || null;
+    const color = b.color || b.vehicleColor || null;
+    const yearRaw = b.year != null ? b.year : b.modelYear;
+    const year = yearRaw !== undefined && yearRaw !== null && yearRaw !== '' ? Number(yearRaw) : null;
+    await conn.query(
+      'INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,model_year,status) VALUES(?,?,?,?,?,?,?,?)',
+      [
+        u.insertId,
+        (b.vehicleType || b.type || 'taxi').toLowerCase(),
+        plate,
+        make,
+        model,
+        color,
+        Number.isFinite(year) ? year : null,
+        'active'
+      ]
+    );
     return u.insertId;
   });
   await audit(req.user.sub, 'create_driver', 'user', id, { fullName: b.fullName, phone: b.phone });
