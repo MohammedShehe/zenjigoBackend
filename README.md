@@ -7,7 +7,7 @@ Production-oriented Node.js + Express + MySQL backend for the ZenjiGO **Rider**,
 - Express 5
 - MySQL 8+
 - JWT access/refresh tokens
-- Twilio Verify for OTP SMS/WhatsApp
+- Email OTP via SMTP for rider, driver and admin verification
 - Cloudinary for images/documents
 - Firebase Admin / FCM for push notifications
 - Socket.IO for live driver location and chat

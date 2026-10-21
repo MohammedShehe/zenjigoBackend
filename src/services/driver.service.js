@@ -1,6 +1,8 @@
 const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service');
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
+ // Accept both historical multipart field names so older clients remain compatible.
+ files = { ...(files || {}), nationalId: (files?.nationalId?.length ? files.nationalId : files?.nationalIdFile?.length ? files.nationalIdFile : []) };
  const phone=normalizePhone(data.phone);
  const emailTarget=String(data.email||'').trim().toLowerCase();
  if(!emailTarget||!emailTarget.includes('@')) throw ApiError.badRequest('A valid email is required.');
@@ -8,7 +10,7 @@ async function register(data,files){
  else throw ApiError.badRequest('emailOtpCode is required for driver registration.');
  if(!data.fullName||!data.email||!data.nationalId)throw ApiError.badRequest('fullName, phone, email and nationalId are required.');
  if(!files?.license?.[0] || !files?.nationalId?.[0] || !files?.insurance?.[0] || !files?.driverPhoto?.[0]) throw ApiError.badRequest('License, national ID, insurance and driver photo are required.');
- const existing=await db.query('SELECT id FROM users WHERE phone=? OR email=?',[phone,data.email.toLowerCase()]); if(existing.length)throw ApiError.conflict('A user already exists with this phone or email.');
+ const existing=await db.query("SELECT id FROM users WHERE role='driver' AND (phone=? OR email=?)",[phone,emailTarget]); if(existing.length)throw ApiError.conflict('A user already exists with this phone or email.');
  const result=await db.transaction(async conn=>{
   const [r]=await conn.query('INSERT INTO users(role,full_name,phone,email,status) VALUES("driver",?,?,?,"pending")',[data.fullName,phone,data.email.toLowerCase()]);
   const id=r.insertId; await conn.query('INSERT INTO driver_profiles(user_id,driver_code,national_id,home_address) VALUES(?,?,?,?)',[id,code(id),data.nationalId,data.homeAddress||null]);

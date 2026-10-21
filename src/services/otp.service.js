@@ -70,7 +70,7 @@ async function send({ target, purpose = 'login', channel }) {
     throw ApiError.badRequest('A valid email address is required for OTP delivery.');
   }
   const ch = 'email';
-  if (channel && !['email', 'sms', 'whatsapp'].includes(String(channel).toLowerCase())) {
+  if (channel && String(channel).toLowerCase() !== 'email') {
     throw ApiError.badRequest('Unsupported channel. Only email OTP is available.');
   }
   const recent = await db.query(

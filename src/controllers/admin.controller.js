@@ -244,7 +244,7 @@ exports.createAdmin = asyncHandler(async (req, res) => {
     await audit(req.user.sub, 'create_admin', 'user', u.insertId, { email: b.email });
     ok(res, { id: u.insertId }, 'Admin created', 201);
   } catch (e) {
-    if (e.code === 'ER_DUP_ENTRY') throw ApiError.conflict('Email or phone already exists');
+    if (e.code === 'ER_DUP_ENTRY') throw ApiError.conflict('This email or phone is already used by an account with the same role.');
     throw e;
   }
 });

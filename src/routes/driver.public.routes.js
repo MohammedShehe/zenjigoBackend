@@ -9,6 +9,7 @@ router.post(
   upload.fields([
     { name: 'license', maxCount: 1 },
     { name: 'nationalId', maxCount: 2 },
+    { name: 'nationalIdFile', maxCount: 1 },
     { name: 'insurance', maxCount: 1 },
     { name: 'vehiclePhotos', maxCount: 5 },
     { name: 'driverPhoto', maxCount: 1 }
@@ -20,8 +21,7 @@ router.post(
     body('nationalId').notEmpty(),
     body('vehicleType').isIn(['boda', 'bajaji', 'taxi']),
     body('plateNumber').notEmpty(),
-    body('phoneOtpCode').notEmpty(),
-    body('emailOtpCode').notEmpty()
+    body('emailOtpCode').notEmpty().withMessage('Email verification code is required')
   ],
   validate,
   c.register

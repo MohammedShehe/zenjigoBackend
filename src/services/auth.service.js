@@ -60,11 +60,11 @@ async function verifyRider({ phone, code, fullName, email, island, region, distr
   if (!mail || !mail.includes('@')) throw ApiError.badRequest('Email is required for verification.');
   await otp.verify({ target: mail, code, purpose: 'login' });
   const target = normalizePhone(phone);
-  let rows = await db.query('SELECT * FROM users WHERE phone=? LIMIT 1', [target]);
+  let rows = await db.query("SELECT * FROM users WHERE phone=? AND role='rider' LIMIT 1", [target]);
   let user;
   if (rows.length) {
     user = rows[0];
-    if (user.role !== 'rider') throw ApiError.conflict('This phone number belongs to another account type.');
+    
     await db.query(
       `UPDATE users SET phone_verified_at=COALESCE(phone_verified_at,UTC_TIMESTAMP()),last_login_at=UTC_TIMESTAMP(),
        full_name=COALESCE(NULLIF(?,''),full_name),email=COALESCE(NULLIF(?,''),email),
@@ -74,7 +74,7 @@ async function verifyRider({ phone, code, fullName, email, island, region, distr
     rows = await db.query('SELECT * FROM users WHERE id=?', [user.id]);
     user = rows[0];
   } else {
-    const byEmail = await db.query('SELECT id FROM users WHERE email=? LIMIT 1', [mail]);
+    const byEmail = await db.query("SELECT id FROM users WHERE email=? AND role='rider' LIMIT 1", [mail]);
     if (byEmail.length) throw ApiError.conflict('This email is already associated with another account.');
     const result = await db.query(
       'INSERT INTO users(role,full_name,phone,email,island,region,district,ward,phone_verified_at) VALUES("rider",?,?,?,?,?,?,?,UTC_TIMESTAMP())',
@@ -131,7 +131,7 @@ async function loginDriver({ phone, email, code }) {
   const user = rows[0];
   if (user.status === 'suspended' || user.status === 'banned') throw ApiError.forbidden('This driver account is suspended.');
   if (mail && mail !== (user.email || '').toLowerCase()) {
-    await db.query('UPDATE users SET email=? WHERE id=?', [mail, user.id]);
+    throw ApiError.unauthorized('The email address does not match this driver account.');
   }
   await db.query('UPDATE users SET phone_verified_at=COALESCE(phone_verified_at,UTC_TIMESTAMP()),last_login_at=UTC_TIMESTAMP() WHERE id=?', [user.id]);
   return {

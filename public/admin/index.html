@@ -128,7 +128,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     window.ZENJIGO_ADMIN_CONFIG = {
-      apiBase: localStorage.getItem('zenjigo-api-url') || (location.origin.includes('5000') ? location.origin + '/api/v1' : 'http://localhost:5000/api/v1')
+      apiBase: localStorage.getItem('zenjigo-api-url') || ((location.protocol === 'http:' || location.protocol === 'https:') && !['localhost','127.0.0.1'].includes(location.hostname) ? location.origin + '/api/v1' : 'http://localhost:5000/api/v1')
     };
   </script>
   <script src="assets/js/api.js"></script>
