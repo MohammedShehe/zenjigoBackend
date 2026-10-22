@@ -512,6 +512,104 @@ exports.updateCommissionSettings = asyncHandler(async (req, res) => {
   ok(res, { cycleLimit: cycle, percent }, 'Commission settings saved');
 });
 
+/* -------------------- Ride fare / charges (admin-editable) -------------------- */
+exports.fareSettings = asyncHandler(async (req, res) => {
+  const rideService = require('../services/ride.service');
+  const cfg = await rideService.getFareConfig();
+  ok(res, cfg);
+});
+
+exports.updateFareSettings = asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  const baseFare = Number(b.baseFare);
+  const perKm = Number(b.perKm);
+  const perMinute = Number(b.perMinute);
+  const bookingFee = Number(b.bookingFee);
+  if (![baseFare, perKm, perMinute, bookingFee].every((n) => Number.isFinite(n) && n >= 0)) {
+    throw ApiError.badRequest('baseFare, perKm, perMinute and bookingFee must be non-negative numbers');
+  }
+  const multipliers = {
+    boda: Number(b.multipliers?.boda ?? b.bodaMultiplier ?? 1),
+    bajaji: Number(b.multipliers?.bajaji ?? b.bajajiMultiplier ?? 1.15),
+    taxi: Number(b.multipliers?.taxi ?? b.taxiMultiplier ?? 1.5)
+  };
+  if (Object.values(multipliers).some((m) => !Number.isFinite(m) || m <= 0)) {
+    throw ApiError.badRequest('Vehicle multipliers must be positive numbers');
+  }
+  const value = {
+    baseFare,
+    perKm,
+    perMinute,
+    bookingFee,
+    multipliers,
+    currency: (b.currency || config.ride?.currency || 'TZS').toString()
+  };
+  await db.query(
+    `INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?)
+     ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,
+    ['ride_fares', JSON.stringify(value), req.user.sub]
+  );
+  await audit(req.user.sub, 'update_fare_settings', 'settings', null, value);
+  ok(res, value, 'Fare settings saved. New quotes will use these values immediately.');
+});
+
+/* -------------------- Rider cancellation policy (admin-editable) -------------------- */
+exports.cancelSettings = asyncHandler(async (req, res) => {
+  const rideService = require('../services/ride.service');
+  const cfg = await rideService.getCancelConfig();
+  ok(res, cfg);
+});
+
+exports.updateCancelSettings = asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  const nearPickupKm = Number(b.nearPickupKm);
+  const percent = Number(b.percent);
+  if (!Number.isFinite(nearPickupKm) || nearPickupKm < 0) {
+    throw ApiError.badRequest('nearPickupKm must be a non-negative number');
+  }
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+    throw ApiError.badRequest('percent must be between 0 and 100');
+  }
+  const value = { nearPickupKm, percent };
+  await db.query(
+    `INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?)
+     ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,
+    ['rider_cancellation', JSON.stringify(value), req.user.sub]
+  );
+  // Remove legacy duplicate key if present
+  await db.query(`DELETE FROM app_settings WHERE setting_key = 'rider_cancellation_fee'`);
+  await audit(req.user.sub, 'update_cancel_settings', 'settings', null, value);
+  ok(res, value, 'Cancellation policy saved. Applies to new cancels immediately.');
+});
+
+
+/* -------------------- Rider cancellation policy (admin-editable) -------------------- */
+exports.cancelSettings = asyncHandler(async (req, res) => {
+  const rideService = require('../services/ride.service');
+  const cfg = await rideService.getCancelConfig();
+  ok(res, cfg);
+});
+
+exports.updateCancelSettings = asyncHandler(async (req, res) => {
+  const nearPickupKm = Number(req.body.nearPickupKm);
+  const percent = Number(req.body.percent);
+  if (!Number.isFinite(nearPickupKm) || nearPickupKm < 0 || nearPickupKm > 50) {
+    throw ApiError.badRequest('nearPickupKm must be between 0 and 50');
+  }
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+    throw ApiError.badRequest('percent must be between 0 and 100');
+  }
+  const value = { nearPickupKm, percent };
+  await db.query(
+    `INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?)
+     ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,
+    ['rider_cancellation', JSON.stringify(value), req.user.sub]
+  );
+  await db.query(`DELETE FROM app_settings WHERE setting_key = 'rider_cancellation_fee'`).catch(() => {});
+  await audit(req.user.sub, 'update_cancel_settings', 'settings', null, value);
+  ok(res, value, 'Cancellation settings saved. Applied on the next rider cancel.');
+});
+
 /* -------------------- Promos -------------------- */
 exports.promos = asyncHandler(async (req, res) => {
   const rows = await db.query(`SELECT * FROM promos ORDER BY id DESC LIMIT 500`);

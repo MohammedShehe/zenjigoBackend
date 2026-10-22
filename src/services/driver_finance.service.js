@@ -139,6 +139,45 @@ async function recordRideEarning(conn, driverId, grossFare, rideId) {
   return { ...s, gross, commission, driverShare };
 }
 
+/**
+ * Near-pickup cancellation compensation for the driver.
+ * Platform fronts 100% of the fee (0% commission). Recovered from the rider
+ * on their next ride via cash / wallet / PayGrid collect.
+ */
+async function recordCancellationCredit(conn, driverId, feeAmount, rideId) {
+  const amount = Math.max(0, Math.round(Number(feeAmount || 0)));
+  if (!amount || !driverId) return null;
+  await ensure(conn, driverId);
+
+  if (rideId) {
+    const existing = await q(
+      conn,
+      `SELECT id FROM driver_earning_ledger WHERE driver_id=? AND ride_id=? AND commission_rate=0 LIMIT 1`,
+      [driverId, rideId]
+    );
+    if (existing.length) return getStatus(driverId, conn);
+  }
+
+  await q(
+    conn,
+    `INSERT INTO driver_earning_ledger(driver_id,ride_id,gross_amount,commission_rate,commission_amount,driver_amount)
+     VALUES(?,?,?,?,?,?)`,
+    [driverId, rideId || null, amount, 0, 0, amount]
+  );
+  // Do not increase gross_since_settlement / commission_owed — platform-funded compensation.
+  await q(
+    conn,
+    `UPDATE driver_financials SET lifetime_gross=lifetime_gross+? WHERE driver_id=?`,
+    [amount, driverId]
+  );
+  await q(
+    conn,
+    'UPDATE driver_profiles SET total_earnings=total_earnings+? WHERE user_id=?',
+    [amount, driverId]
+  );
+  return { driverId, amount, rideId, type: 'cancellation_credit' };
+}
+
 /* ------------------------------------------------------------------ */
 /* Settlement records                                                  */
 /* ------------------------------------------------------------------ */
@@ -497,6 +536,7 @@ module.exports = {
   state, getStatus, isBlocked, assertUsable,
   assertCanOperate: assertUsable, // used by middleware/driverSettlementGate.js
   recordRideEarning,
+  recordCancellationCredit,
   createSettlement, initiateSettlementPayment, confirmSettlementPaid, failSettlement,
   findSettlementFromWebhook, listSettlements, getOwnSettlement, getSettlement,
   adminSettle, markPaid, settleNow,

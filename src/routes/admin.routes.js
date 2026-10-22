@@ -49,6 +49,12 @@ router.patch('/payouts/:id/status', [
 router.get('/commissions', c.commissions);
 router.get('/commission-settings', c.commissionSettings);
 router.patch('/commission-settings', c.updateCommissionSettings);
+router.get('/fare-settings', c.fareSettings);
+router.patch('/fare-settings', c.updateFareSettings);
+router.get('/cancel-settings', c.cancelSettings);
+router.patch('/cancel-settings', c.updateCancelSettings);
+router.get('/cancel-settings', c.cancelSettings);
+router.patch('/cancel-settings', c.updateCancelSettings);
 
 // Promos
 router.get('/promos', c.promos);
