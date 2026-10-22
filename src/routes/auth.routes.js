@@ -38,7 +38,8 @@ router.post('/driver/verify-otp', [
 ], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'driver_registration'; c.verifyDriverOtp(req, res, next); });
 
 router.post('/driver/login', [
-  body('phone').notEmpty(), body('email').optional().isEmail(), body('code').notEmpty()
+  body('email').isEmail().withMessage('A valid email is required for driver sign-in'),
+  body('code').isLength({ min: 4, max: 8 }).withMessage('A valid OTP code is required')
 ], validate, c.loginDriver);
 
 router.post('/admin/login', [body('email').isEmail(), body('password').isString().isLength({ min: 8 })], validate, c.adminLogin);

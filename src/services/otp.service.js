@@ -165,4 +165,31 @@ async function check({ target, code, purpose = 'login' }) {
   return true;
 }
 
-module.exports = { send, verify, check };
+
+/**
+ * Registration verification survives the multi-step form. A code verified at the
+ * email step is stored with status="verified"; final submission accepts that
+ * proof for 24 hours rather than trying to consume an already-used/expired OTP.
+ * For the web form (which submits the code only at the end), a still-pending
+ * valid code is verified here.
+ */
+async function verifyRegistrationForSubmit({ target, code, purpose = 'driver_registration' }) {
+  const email = String(target || '').trim().toLowerCase();
+  if (!email || !email.includes('@')) {
+    throw ApiError.badRequest('A valid email address is required.');
+  }
+  const verified = await db.query(
+    `SELECT id FROM otp_verifications
+     WHERE target=? AND purpose=? AND status="verified"
+       AND verified_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 24 HOUR)
+     ORDER BY verified_at DESC, id DESC LIMIT 1`,
+    [email, purpose]
+  );
+  if (verified.length) return true;
+  if (!String(code || '').trim()) {
+    throw ApiError.badRequest('Please verify your email before submitting the application.');
+  }
+  return verify({ target: email, code: String(code).trim(), purpose });
+}
+
+module.exports = { send, verify, check, verifyRegistrationForSubmit };

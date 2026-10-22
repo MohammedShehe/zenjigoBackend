@@ -18,9 +18,22 @@ async function register(data,files){
  const phone=normalizePhone(data.phone);
  const emailTarget=String(data.email||'').trim().toLowerCase();
  if(!emailTarget||!emailTarget.includes('@')) throw ApiError.badRequest('A valid email is required.');
- if(data.emailOtpCode) await otp.verify({target:emailTarget,code:data.emailOtpCode,purpose:'driver_registration'});
- else throw ApiError.badRequest('emailOtpCode is required for driver registration.');
- if(!data.fullName||!data.email||!data.nationalId)throw ApiError.badRequest('fullName, phone, email and nationalId are required.');
+ // The Flutter app verifies email at step 1, while the web form submits the
+ // code only at the end. Accept a recent persisted verification OR verify the
+ // still-pending code supplied by the web form.
+ await otp.verifyRegistrationForSubmit({
+   target: emailTarget,
+   code: data.emailOtpCode,
+   purpose: 'driver_registration'
+ });
+ if(!String(data.fullName || '').trim() ||
+    !String(data.phone || '').trim() ||
+    !emailTarget ||
+    !String(data.nationalId || '').trim() ||
+    !String(data.plateNumber || '').trim() ||
+    !String(data.vehicleType || '').trim()) {
+   throw ApiError.badRequest('Full name, phone, email, national ID, vehicle type and plate number are required.');
+ }
  if(!files?.license?.[0] || !files?.nationalId?.[0] || !files?.insurance?.[0] || !files?.driverPhoto?.[0]) {
    throw ApiError.badRequest('License, national ID, insurance and driver photo are required.');
  }

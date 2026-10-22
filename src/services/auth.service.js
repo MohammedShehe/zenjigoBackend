@@ -119,7 +119,9 @@ async function verifyDriverOtp({ target, code, purpose = 'driver_registration' }
   const t = String(target || '').trim().toLowerCase();
   if (!t || !t.includes('@')) throw ApiError.badRequest('A valid email target is required.');
   if (!code || String(code).trim().length < 4) throw ApiError.badRequest('OTP code is required.');
-  await otp.check({ target: t, code: String(code).trim(), purpose });
+  // Mark the code as verified immediately so multi-step registration does not
+  // fail later when the original OTP TTL elapses.
+  await otp.verify({ target: t, code: String(code).trim(), purpose });
   return { verified: true, target: t };
 }
 
@@ -190,24 +192,32 @@ async function verifyAdminOtp({ email, code }) {
 async function loginDriver({ phone, email, code }) {
   const mail = String(email || '').trim().toLowerCase();
   if (!mail || !mail.includes('@')) {
-    const targetPhone = normalizePhone(phone);
-    const rows = await db.query(
-      'SELECT u.email FROM users u JOIN driver_profiles d ON d.user_id=u.id WHERE u.phone=? AND u.role="driver" LIMIT 1', [targetPhone]);
-    if (!rows.length || !rows[0].email) throw ApiError.badRequest('Email is required for verification.');
-    await otp.verify({ target: String(rows[0].email).toLowerCase(), code, purpose: 'login' });
-  } else {
-    await otp.verify({ target: mail, code, purpose: 'login' });
+    throw ApiError.badRequest('A valid email address is required.');
   }
-  const target = normalizePhone(phone);
+  if (!code || !String(code).trim()) {
+    throw ApiError.badRequest('OTP code is required.');
+  }
+
+  // Email is the only authentication factor for the driver app. Phone may
+  // remain on the profile as contact data, but is not required for sign-in.
   const rows = await db.query(
-    'SELECT u.*,d.application_status FROM users u JOIN driver_profiles d ON d.user_id=u.id WHERE u.phone=? AND u.role="driver" LIMIT 1', [target]);
-  if (!rows.length) throw ApiError.notFound('Driver account not found. Complete driver registration first.');
-  const user = rows[0];
-  if (user.status === 'suspended' || user.status === 'banned') throw ApiError.forbidden('This driver account is suspended.');
-  if (mail && mail !== (user.email || '').toLowerCase()) {
-    throw ApiError.unauthorized('The email address does not match this driver account.');
+    `SELECT u.*, d.application_status
+       FROM users u
+       JOIN driver_profiles d ON d.user_id = u.id
+      WHERE u.email = ? AND u.role = "driver"
+      LIMIT 1`,
+    [mail]
+  );
+  if (!rows.length) {
+    throw ApiError.notFound('Driver account not found. Complete driver registration first.');
   }
-  await db.query('UPDATE users SET phone_verified_at=COALESCE(phone_verified_at,UTC_TIMESTAMP()),last_login_at=UTC_TIMESTAMP() WHERE id=?', [user.id]);
+  const user = rows[0];
+  if (user.status === 'suspended' || user.status === 'banned') {
+    throw ApiError.forbidden('This driver account is suspended.');
+  }
+
+  await otp.verify({ target: mail, code: String(code).trim(), purpose: 'login' });
+  await db.query('UPDATE users SET last_login_at=UTC_TIMESTAMP() WHERE id=?', [user.id]);
   return {
     user: { ...publicUser(user), applicationStatus: user.application_status },
     accessToken: signAccess({ sub: user.id, role: 'driver' }),

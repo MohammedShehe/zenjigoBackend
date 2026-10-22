@@ -161,3 +161,13 @@ Do not treat the manual completion endpoint as a production payment webhook. Whe
 - Enable MySQL backups and monitoring.
 - Rotate JWT/credential secrets periodically.
 - Never commit `.env` or Firebase service-account JSON.
+
+## Driver authentication and registration fixes
+
+- Driver sign-in is email OTP only: `POST /api/v1/auth/driver/send-otp` with `{ email, purpose: "login" }`, then `POST /api/v1/auth/driver/login` with `{ email, code }`. Phone is not required for sign-in.
+- Driver registration email verification is persisted when `/auth/driver/verify-otp` succeeds. Final registration accepts that verified status for 24 hours, so the OTP does not need to remain unexpired while the applicant completes the other steps.
+- The web registration flow remains compatible: it may submit `emailOtpCode` at final submission if it has not verified it through the separate endpoint.
+- Driver database rows are created only after required document uploads succeed, inside the database transaction in `src/services/driver.service.js`.
+
+After replacing backend files, restart the Node server. Do not distribute `.env` or production credentials in source archives.
+
