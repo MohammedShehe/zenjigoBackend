@@ -6,6 +6,7 @@ const archiveService = require('../services/archive.service');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyUser } = require('../services/notification.service');
+const chatService = require('../services/chat.service');
 
 function audit(adminId, action, entityType, entityId, meta = null) {
   return db.query(
@@ -674,15 +675,32 @@ exports.sendNotification = asyncHandler(async (req, res) => {
   ok(res, { id: r.insertId }, 'Notification sent', 201);
 });
 
-/* -------------------- Conversations -------------------- */
+/* -------------------- Conversations / Support chat -------------------- */
 exports.conversations = asyncHandler(async (req, res) => {
-  const rows = await db.query(`
-    SELECT c.*, COUNT(cm.id) messageCount
-    FROM conversations c
-    LEFT JOIN messages cm ON cm.conversation_id=c.id
-    GROUP BY c.id
-    ORDER BY c.updated_at DESC LIMIT 500`);
-  ok(res, rows);
+  ok(res, await chatService.adminList(req.user.sub));
+});
+
+exports.conversationMessages = asyncHandler(async (req, res) => {
+  ok(res, await chatService.adminMessages(req.user.sub, req.params.id));
+});
+
+exports.sendConversationMessage = asyncHandler(async (req, res) => {
+  if (!req.body?.text?.trim()) throw ApiError.badRequest('Message text is required');
+  ok(res, await chatService.adminSend(req.user.sub, req.params.id, req.body.text.trim(), req.body.replyToId), 'Message sent', 201);
+});
+
+exports.markConversationRead = asyncHandler(async (req, res) => {
+  ok(res, await chatService.markRead(req.user.sub, req.params.id), 'Conversation marked as read');
+});
+
+exports.markAllSupportRead = asyncHandler(async (req, res) => {
+  ok(res, await chatService.adminMarkAllSupportRead(req.user.sub), 'Support threads marked as read');
+});
+
+exports.markAllNotificationsRead = asyncHandler(async (req, res) => {
+  await db.query('UPDATE notifications SET read_at=COALESCE(read_at, UTC_TIMESTAMP()) WHERE read_at IS NULL');
+  await audit(req.user.sub, 'mark_all_notifications_read', 'notification', null);
+  ok(res, { ok: true }, 'All notifications marked as read');
 });
 
 /* -------------------- Settings & Audit -------------------- */

@@ -69,9 +69,14 @@ router.get('/parcels', c.parcels);
 router.get('/notifications', c.notifications);
 router.post('/notifications', c.sendNotification);
 router.patch('/notifications/:id/read', c.markNotificationRead);
+router.post('/notifications/mark-all-read', c.markAllNotificationsRead);
 
-// Conversations
+// Conversations / Support chat center
 router.get('/conversations', c.conversations);
+router.post('/conversations/mark-all-read', c.markAllSupportRead);
+router.get('/conversations/:id/messages', c.conversationMessages);
+router.post('/conversations/:id/messages', c.sendConversationMessage);
+router.post('/conversations/:id/read', c.markConversationRead);
 
 // Settings & Audit
 router.get('/settings', c.settings);
