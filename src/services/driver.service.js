@@ -1,4 +1,4 @@
-const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service');
+const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service'); const {sendWelcomeEmail}=require('./welcome-email.service');
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
  // Accept both historical multipart field names so older clients remain compatible.
@@ -77,6 +77,9 @@ async function register(data,files){
    }
    return id;
  });
+
+ try { await sendWelcomeEmail({ email: emailTarget, name: data.fullName, role: 'driver' }); }
+ catch (err) { console.error('[WELCOME EMAIL] Failed to send driver welcome email:', err.message); }
 
  return {
    driverId: result,

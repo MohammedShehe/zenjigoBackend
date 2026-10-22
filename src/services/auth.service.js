@@ -3,6 +3,7 @@ const ApiError = require('../utils/ApiError');
 const { normalizePhone } = require('../utils/phone');
 const { signAccess, issueRefreshToken } = require('../utils/jwt');
 const otp = require('./otp.service');
+const { sendWelcomeEmail } = require('./welcome-email.service');
 
 function publicUser(row, wallet = 0) {
   return {
@@ -72,6 +73,13 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
     }
 
     if (!user) {
+      // New rider registration: account does not exist yet.
+      // Deliver OTP to the email the client provided so verifyRider can create the user
+      // with fullName, island, region, etc. from the registration form.
+      if (resolvedRole === 'rider' && mail) {
+        await otp.send({ target: mail, purpose: 'login', channel: 'email' });
+        return { target: mail, maskedEmail: maskEmail(mail) };
+      }
       throw ApiError.notFound(
         resolvedRole
           ? `No ${resolvedRole} account found for these credentials.`
@@ -122,6 +130,7 @@ async function verifyRider({ phone, code, fullName, email, island, region, distr
   const target = normalizePhone(phone);
   let rows = await db.query("SELECT * FROM users WHERE phone=? AND role='rider' LIMIT 1", [target]);
   let user;
+  let isNewRider = false;
   if (rows.length) {
     user = rows[0];
     
@@ -140,11 +149,16 @@ async function verifyRider({ phone, code, fullName, email, island, region, distr
       'INSERT INTO users(role,full_name,phone,email,island,region,district,ward,phone_verified_at) VALUES("rider",?,?,?,?,?,?,?,UTC_TIMESTAMP())',
       [fullName || 'ZenjiGO Rider', target, mail, island || null, region || null, district || null, ward || null]);
     const id = result.insertId;
+    isNewRider = true;
     await db.query('INSERT INTO rider_profiles(user_id,referral_code) VALUES(?,?)', [id, `ZG${String(id).padStart(6, '0')}`]);
     await db.query('INSERT INTO wallets(user_id) VALUES(?)', [id]);
     user = (await db.query('SELECT * FROM users WHERE id=?', [id]))[0];
   }
   const wallet = (await db.query('SELECT balance FROM wallets WHERE user_id=?', [user.id]))[0]?.balance || 0;
+  if (isNewRider) {
+    try { await sendWelcomeEmail({ email: user.email, name: user.full_name, role: 'rider' }); }
+    catch (err) { console.error('[WELCOME EMAIL] Failed to send rider welcome email:', err.message); }
+  }
   return { user: publicUser(user, wallet), accessToken: signAccess({ sub: user.id, role: user.role }), refreshToken: await issueRefreshToken(user.id, user.role) };
 }
 
