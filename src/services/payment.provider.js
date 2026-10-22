@@ -51,8 +51,12 @@ function normalizeTzPhone(phone) {
  * Create mobile money payment (USSD push).
  * Official: POST /api/v1/payments  type: mobile
  */
-async function initiateCollect({ amount, currency, userId, phone, reference, customer, network, metadata }) {
+async function initiateCollect({ amount, currency, userId, phone, reference, customer, network, metadata, channel }) {
   if (!isConfigured()) {
+    // Never pretend a charge was started in production.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Payment provider is not configured.');
+    }
     return {
       provider: 'paygrid-dev',
       externalReference: reference || `ZENJIGO-TOPUP-${userId}-${Date.now()}`,
@@ -76,7 +80,7 @@ async function initiateCollect({ amount, currency, userId, phone, reference, cus
     metadata: {
       ...(metadata || {}),
       userId: String(userId),
-      channel: 'wallet_topup'
+      channel: channel || 'wallet_topup'
     }
   };
   if (network) body.network = network;
@@ -117,28 +121,31 @@ async function initiateCollect({ amount, currency, userId, phone, reference, cus
 /**
  * Charge saved method / commission — uses same create payment API (mobile).
  */
-async function chargeDriverCommission({ amount, currency, driverId, paymentMethod, customer }) {
+async function chargeDriverCommission({ amount, currency, driverId, settlementId, reference, paymentMethod, customer }) {
+  const phone = paymentMethod?.phone || paymentMethod?.msisdn;
+  const ref = reference || `ZENJIGO-COM-${driverId}-${settlementId || 'X'}-${Date.now()}`;
+
   if (!isConfigured()) {
-    return {
-      provider: 'paygrid-dev',
-      externalReference: `ZENJIGO-COM-${driverId}-${Date.now()}`
-    };
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Payment provider is not configured.');
+    }
+    // Development only: the charge stays pending until a webhook / admin confirms it.
+    return { provider: 'paygrid-dev', externalReference: ref, status: 'pending' };
   }
 
-  const phone = paymentMethod?.phone || paymentMethod?.msisdn;
-  if (!phone) throw new Error('Driver payment method has no phone number for PayGrid mobile charge.');
+  if (!phone) throw new Error('A mobile-money phone number is required for the PayGrid charge.');
 
-  const reference = `ZENJIGO-COM-${driverId}-${Date.now()}`;
-  const result = await initiateCollect({
+  // Success of this call only means the USSD prompt was sent. It is NOT proof of payment.
+  return initiateCollect({
     amount,
     currency: currency || 'TZS',
     userId: driverId,
     phone,
-    reference,
+    reference: ref,
     customer,
-    metadata: { type: 'driver_commission', driverId: String(driverId) }
+    channel: 'driver_commission',
+    metadata: { type: 'driver_commission', driverId: String(driverId), settlementId: settlementId != null ? String(settlementId) : undefined }
   });
-  return result;
 }
 
 /**

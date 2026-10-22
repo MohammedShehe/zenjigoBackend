@@ -51,3 +51,14 @@ Driver earnings are recorded in `driver_earning_ledger`. A driver becomes restri
 
 Take a database backup before applying production migrations.
 Never store raw card/mobile-money credentials. Store only provider-issued payment tokens/mandates.
+
+## Driver settlement payments (migration 009)
+
+A `driver_settlements` row moves through `pending` -> `processing` -> `paid` (or `failed`).
+
+- `POST /api/v1/driver/settlements` creates the settlement and starts a PayGrid mobile-money charge (`processing`).
+- The settlement becomes `paid` **only** when PayGrid's signed webhook (`POST /api/v1/payments/webhook`) reports success
+  for that settlement, with an amount that covers the commission. Only then is `commission_owed` reduced and the driver unblocked.
+- Drivers can poll `GET /api/v1/driver/settlements/:id`. Drivers can no longer mark a settlement paid themselves.
+- Admins can record an off-platform payment with `POST /api/v1/admin/drivers/:id/settle` (`{ reference?, note?, force? }`).
+- A charge with no webhook after `SETTLEMENT_PROCESSING_TIMEOUT_MIN` (default 15) minutes is marked `failed` so the driver can retry.

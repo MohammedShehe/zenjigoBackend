@@ -251,6 +251,14 @@ document.addEventListener('click', async (e) => {
         await afterMutation('finance');
         break;
       }
+      case 'settle-driver': {
+        if (!confirm('Record that this driver has paid the commission they owe (cash / bank, outside the app)?\n\nThis clears their outstanding commission and unblocks them. Mobile-money payments are confirmed automatically — do not use this for those.')) return;
+        const reference = prompt('Payment reference / receipt number (optional):') || '';
+        await API.post(`/admin/drivers/${id}/settle`, { reference });
+        toast('Commission payment recorded');
+        await afterMutation('finance');
+        break;
+      }
       case 'payout-status': {
         await API.patch(`/admin/payouts/${id}/status`, { status });
         toast('Payout status updated');

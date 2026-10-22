@@ -22,9 +22,16 @@ exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user
 exports.history=asyncHandler(async(req,res)=>ok(res,await ride.listForUser(req.user.sub,'driver',req.query.limit)));
 
 exports.finance=asyncHandler(async(req,res)=>ok(res,await finance.getStatus(req.user.sub)));
-exports.settlement=asyncHandler(async(req,res)=>ok(res,await finance.createSettlement(req.user.sub,req.body.provider||'example',req.body.metadata||{}),'Settlement created',201));
-exports.markSettlementPaid=asyncHandler(async(req,res)=>ok(res,await finance.markPaid(req.user.sub,req.params.id,req.body.externalReference),'Settlement recorded'));
+// Starts a mobile-money charge for the commission owed. The settlement only becomes
+// "paid" after the provider's signed webhook confirms it — drivers cannot mark it paid.
+exports.settlement=asyncHandler(async(req,res)=>{
+  const r=await finance.initiateSettlementPayment(req.user.sub,{paymentMethodId:req.body.paymentMethodId||null,phone:req.body.phone||null});
+  ok(res,r,r.status==='already_settled'?'Nothing to settle':'Settlement payment started',r.status==='already_settled'?200:201);
+});
+exports.listSettlements=asyncHandler(async(req,res)=>ok(res,await finance.listSettlements(req.user.sub,req.query.limit)));
+exports.getSettlement=asyncHandler(async(req,res)=>ok(res,await finance.getOwnSettlement(req.user.sub,req.params.id)));
+
 exports.autopay=asyncHandler(async(req,res)=>{ const result=await finance.configureAutopay(req.user.sub,Boolean(req.body.enabled),req.body.provider,req.body.providerToken,req.body.metadata||{}); if(req.body.enabled){ const auto=await finance.tryAutopay(req.user.sub); return ok(res,{finance:result,autopayAttempt:auto},'Autopay updated'); } ok(res,result,'Autopay updated'); });
-exports.paymentMethods=asyncHandler(async(req,res)=>ok(res,await db.query('SELECT id,provider,method_type,account_label,masked_account,is_autopay_default,created_at FROM driver_payment_methods WHERE driver_id=? ORDER BY id DESC',[req.user.sub])));
+exports.paymentMethods=asyncHandler(async(req,res)=>ok(res,await db.query('SELECT id,provider,method_type,account_label,masked_account,phone,is_autopay_default,created_at FROM driver_payment_methods WHERE driver_id=? AND active=1 ORDER BY id DESC',[req.user.sub])));
 exports.addPaymentMethod=asyncHandler(async(req,res)=>ok(res,await finance.addPaymentMethod(req.user.sub,req.body),'Payment method added',201));
 exports.removePaymentMethod=asyncHandler(async(req,res)=>{await db.query('UPDATE driver_payment_methods SET active=0,is_autopay_default=0 WHERE id=? AND driver_id=?',[req.params.id,req.user.sub]);ok(res,null,'Payment method removed');});

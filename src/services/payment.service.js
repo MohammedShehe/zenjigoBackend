@@ -7,6 +7,7 @@ const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
 const config = require('../config/env');
 const provider = require('./payment.provider');
+const finance = require('./driver_finance.service');
 
 function getWebhookSecret() {
   return config.payment.webhookSecret || process.env.PAYGRID_WEBHOOK_SECRET || '';
@@ -16,7 +17,7 @@ function verifySignature(rawBody, signature) {
   return provider.verifyWebhook(rawBody, signature);
 }
 
-async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid') {
+async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid', confirmedAmount = null) {
   return db.transaction(async (conn) => {
     const [rows] = await conn.query(
       'SELECT * FROM payment_transactions WHERE id = ? FOR UPDATE',
@@ -25,6 +26,15 @@ async function completeWalletTopup(paymentId, externalReference, providerName = 
     if (!rows.length) throw ApiError.notFound('Payment transaction not found.');
     const p = rows[0];
     if (p.status === 'success') return p;
+
+    // Never credit more than the provider says it actually collected.
+    if (confirmedAmount != null && Number.isFinite(Number(confirmedAmount)) && Number(confirmedAmount) + 0.009 < Number(p.amount)) {
+      await conn.query(
+        `UPDATE payment_transactions SET metadata = JSON_SET(COALESCE(metadata, '{}'), '$.underpaid', ?) WHERE id = ?`,
+        [String(confirmedAmount), paymentId]
+      );
+      return { ...p, status: 'underpaid' };
+    }
 
     await conn.query(
       `UPDATE payment_transactions
@@ -168,6 +178,7 @@ function normalizeWebhookPayload(body) {
 
   const merchantRef = b.merchant_reference || data.merchant_reference || null;
   const paymentIdMeta = (b.metadata && b.metadata.paymentId) || (data.metadata && data.metadata.paymentId) || null;
+  const settlementIdMeta = (b.metadata && b.metadata.settlementId) || (data.metadata && data.metadata.settlementId) || null;
 
   return {
     success,
@@ -175,7 +186,9 @@ function normalizeWebhookPayload(body) {
     externalReference: externalReference != null ? String(externalReference) : null,
     merchantReference: merchantRef != null ? String(merchantRef) : null,
     paymentId: paymentIdMeta != null && !Number.isNaN(Number(paymentIdMeta)) ? Number(paymentIdMeta) : null,
+    settlementId: settlementIdMeta != null && !Number.isNaN(Number(settlementIdMeta)) ? Number(settlementIdMeta) : null,
     amount: data.amount != null ? Number(data.amount) : b.amount != null ? Number(b.amount) : null,
+    currency: data.currency || b.currency || null,
     rawStatus: statusRaw,
     eventId: b.event_id || null,
     provider: 'paygrid'
@@ -199,8 +212,14 @@ async function findPaymentFromWebhook(event) {
   return null;
 }
 
+/** Look up a driver-commission settlement for a webhook event. */
+async function findSettlementFromWebhook(event) {
+  return finance.findSettlementFromWebhook(event);
+}
+
 module.exports = {
   verifySignature,
+  findSettlementFromWebhook,
   completeWalletTopup,
   failPayment,
   initiateTopup,

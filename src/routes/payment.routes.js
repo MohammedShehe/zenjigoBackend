@@ -5,8 +5,10 @@ const {
   completeWalletTopup,
   failPayment,
   normalizeWebhookPayload,
-  findPaymentFromWebhook
+  findPaymentFromWebhook,
+  findSettlementFromWebhook
 } = require('../services/payment.service');
+const finance = require('../services/driver_finance.service');
 
 /**
  * PayGrid webhook + callback
@@ -45,6 +47,32 @@ router.post('/webhook', async (req, res) => {
     }
 
     const event = normalizeWebhookPayload(body);
+
+    // 1) Driver commission settlement (reference ZENJIGO-COM-... / metadata.settlementId)
+    const settlement = await findSettlementFromWebhook(event);
+    if (settlement) {
+      if (settlement.status === 'paid') {
+        return res.json({ success: true, data: { settlementId: settlement.id, status: 'paid' } });
+      }
+      if (event.failed) {
+        await finance.failSettlement(settlement.id, event.rawStatus || 'failed');
+        return res.json({ success: true, data: { settlementId: settlement.id, status: 'failed' } });
+      }
+      if (event.success) {
+        const r = await finance.confirmSettlementPaid(settlement.id, {
+          externalReference: settlement.external_reference || event.externalReference,
+          providerReference: event.externalReference,
+          amount: event.amount,
+          currency: event.currency,
+          eventId: event.eventId,
+          confirmedBy: 'provider_webhook'
+        });
+        return res.json({ success: true, data: { settlementId: settlement.id, status: r.status } });
+      }
+      return res.json({ success: true, data: { settlementId: settlement.id, status: settlement.status } });
+    }
+
+    // 2) Wallet top-up
     const payment = await findPaymentFromWebhook(event);
 
     if (!payment) {
@@ -68,9 +96,10 @@ router.post('/webhook', async (req, res) => {
       const p = await completeWalletTopup(
         payment.id,
         event.externalReference || payment.external_reference,
-        'paygrid'
+        'paygrid',
+        event.amount
       );
-      return res.json({ success: true, data: { paymentId: p.id, status: 'success' } });
+      return res.json({ success: true, data: { paymentId: p.id, status: p.status } });
     }
 
     return res.json({

@@ -415,19 +415,9 @@ exports.completePayment = asyncHandler(async (req, res) => {
   const rows = await db.query(`SELECT * FROM payment_transactions WHERE id=?`, [id]);
   if (!rows.length) throw ApiError.notFound('Payment not found');
   if (rows[0].status !== 'pending') throw ApiError.badRequest('Payment is not pending');
-  await db.transaction(async (conn) => {
-    await conn.query(`UPDATE payment_transactions SET status='success' WHERE id=?`, [id]);
-    const [w] = await conn.query(`SELECT balance FROM wallets WHERE user_id=? FOR UPDATE`, [rows[0].user_id]);
-    const bal = w.length ? Number(w[0].balance) : 0;
-    const after = bal + Number(rows[0].amount);
-    if (w.length) await conn.query(`UPDATE wallets SET balance=? WHERE user_id=?`, [after, rows[0].user_id]);
-    else await conn.query(`INSERT INTO wallets(user_id,balance) VALUES(?,?)`, [rows[0].user_id, after]);
-    await conn.query(
-      `INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,status,description)
-       VALUES(?,?,?,?,?,?,?,?,?)`,
-      [rows[0].user_id, 'topup', rows[0].amount, bal, after, 'payment', id, 'success', 'Admin completed payment']
-    );
-  });
+  // Same locked, idempotent path the provider webhook uses, so a webhook arriving at the
+  // same moment can never credit the wallet twice.
+  await require('../services/payment.service').completeWalletTopup(id, null, 'admin');
   await audit(req.user.sub, 'complete_payment', 'payment', id);
   ok(res, null, 'Payment completed');
 });
@@ -459,19 +449,26 @@ exports.driverFinance = asyncHandler(async (req, res) => {
   ok(res, rows);
 });
 
+/**
+ * Admin records an off-platform (cash/bank) commission payment for a driver.
+ * Goes through the same settlement path as provider payments, so commission_owed
+ * and the driver's restriction are updated consistently. Only settles commission
+ * that is actually owed.
+ */
 exports.settleDriver = asyncHandler(async (req, res) => {
-  const id = req.params.id;
-  const amount = Number(req.body.amount || 0);
-  const rate = Number(req.body.commissionRate || process.env.DRIVER_COMMISSION_PERCENT || 20);
-  const commission = +(amount * rate / 100).toFixed(2);
-  const paid = +(amount - commission).toFixed(2);
-  await db.query(
-    `INSERT INTO driver_settlements(driver_id,gross_earnings,commission_rate,commission_amount,paid_amount,status,paid_at)
-     VALUES(?,?,?,?,?,'paid',UTC_TIMESTAMP())`,
-    [id, amount, rate, commission, paid]
-  );
-  await audit(req.user.sub, 'settle_driver', 'user', id, { amount, rate, commission, paid });
-  ok(res, null, 'Driver settlement recorded');
+  const id = Number(req.params.id);
+  const finance = require('../services/driver_finance.service');
+  const result = await finance.adminSettle(id, req.user.sub, {
+    reference: req.body.reference || null,
+    note: req.body.note || null,
+    force: Boolean(req.body.force)
+  });
+  await audit(req.user.sub, 'settle_driver', 'user', id, {
+    settlementId: result.settlement && result.settlement.id,
+    amount: result.settlement && result.settlement.paidAmount,
+    reference: req.body.reference || null
+  });
+  ok(res, result, 'Driver settlement recorded');
 });
 
 exports.commissions = asyncHandler(async (req, res) => {

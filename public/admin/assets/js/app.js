@@ -417,7 +417,14 @@ window.AdminPages = {
           <td>${esc(c.driverName)}</td><td>${money(c.grossAmount)}</td><td>${money(c.commissionAmount)}</td>
           <td>${money(c.driverAmount)}</td><td class="small">${c.createdAt ? new Date(c.createdAt).toLocaleString() : '—'}</td>
         </tr>`).join(''))}</div>
-    </div>`;
+    </div>
+    <div class="row g-3 mb-3"><div class="col-12">${tableWrap('Driver commission owed', '',
+        '<th>Driver</th><th>Gross since settlement</th><th>Commission owed</th><th>Status</th><th></th>',
+        (D.finance || []).map((d) => `<tr>
+          <td>${esc(d.driverName || d.driver_id)}</td><td>${money(d.gross_since_settlement)}</td><td>${money(d.commission_owed)}</td>
+          <td>${Number(d.commission_owed) > 0 ? badge('pending') : badge('paid')}</td>
+          <td>${Number(d.commission_owed) > 0 ? `<button class="btn btn-sm btn-outline-success" data-action="settle-driver" data-id="${d.driver_id}" title="Record a cash/bank commission payment received outside the app">Record payment</button>` : ''}</td>
+        </tr>`).join(''))}</div></div>`;
   },
 
   withdrawals() {
