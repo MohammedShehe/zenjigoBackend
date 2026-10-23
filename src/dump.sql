@@ -34,7 +34,7 @@ CREATE TABLE `admin_audit_logs` (
   PRIMARY KEY (`id`),
   KEY `idx_admin_audit` (`admin_id`,`created_at`),
   CONSTRAINT `fk_audit_admin` FOREIGN KEY (`admin_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -43,6 +43,7 @@ CREATE TABLE `admin_audit_logs` (
 
 LOCK TABLES `admin_audit_logs` WRITE;
 /*!40000 ALTER TABLE `admin_audit_logs` DISABLE KEYS */;
+INSERT INTO `admin_audit_logs` VALUES (1,1,'driver_status','user',14,'{\"status\":\"active\",\"reason\":null}',NULL,'2026-10-22 19:56:24'),(2,1,'mark_all_notifications_read','notification',NULL,NULL,NULL,'2026-10-22 19:57:23'),(3,1,'archive_rider','user',15,'{\"archiveId\":1,\"reason\":\"Archived by admin\"}',NULL,'2026-10-22 20:56:32'),(4,1,'permanent_delete_user','user_archive',1,'{\"deleted\":true,\"archiveId\":1,\"originalUserId\":15,\"role\":\"rider\"}',NULL,'2026-10-22 20:56:40'),(5,1,'update_fare_settings','settings',NULL,'{\"baseFare\":2500,\"perKm\":900,\"perMinute\":100,\"bookingFee\":500,\"multipliers\":{\"boda\":1,\"bajaji\":1.15,\"taxi\":1.5},\"currency\":\"TZS\"}',NULL,'2026-10-23 00:57:07'),(6,1,'update_cancel_settings','settings',NULL,'{\"nearPickupKm\":1,\"percent\":20}',NULL,'2026-10-23 01:29:09');
 /*!40000 ALTER TABLE `admin_audit_logs` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -70,7 +71,7 @@ CREATE TABLE `app_settings` (
 
 LOCK TABLES `app_settings` WRITE;
 /*!40000 ALTER TABLE `app_settings` DISABLE KEYS */;
-INSERT INTO `app_settings` VALUES ('driver_commission','{\"thresholdTzs\": 60000, \"commissionPercent\": 20, \"driverPercent\": 80}',1,'2026-10-01 04:53:18'),('rider_cancellation','{\"nearPickupKm\": 1, \"percent\": 20}',1,'2026-10-01 04:53:18'),('rider_cancellation_fee','{\"percent\": 20, \"nearPickupKm\": 0.5}',NULL,'2026-10-01 03:46:22');
+INSERT INTO `app_settings` VALUES ('driver_commission','{\"thresholdTzs\": 60000, \"commissionPercent\": 20, \"driverPercent\": 80}',1,'2026-10-01 04:53:18'),('ride_fares','{\"baseFare\":2500,\"perKm\":900,\"perMinute\":100,\"bookingFee\":500,\"multipliers\":{\"boda\":1,\"bajaji\":1.15,\"taxi\":1.5},\"currency\":\"TZS\"}',1,'2026-10-23 00:57:07'),('rider_cancellation','{\"nearPickupKm\":1,\"percent\":20}',1,'2026-10-22 19:59:09');
 /*!40000 ALTER TABLE `app_settings` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -85,6 +86,7 @@ CREATE TABLE `conversation_members` (
   `conversation_id` bigint(20) unsigned NOT NULL,
   `user_id` bigint(20) unsigned NOT NULL,
   `joined_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `last_read_at` datetime DEFAULT NULL,
   PRIMARY KEY (`conversation_id`,`user_id`),
   KEY `fk_cm_user` (`user_id`),
   CONSTRAINT `fk_cm_conv` FOREIGN KEY (`conversation_id`) REFERENCES `conversations` (`id`) ON DELETE CASCADE,
@@ -98,6 +100,7 @@ CREATE TABLE `conversation_members` (
 
 LOCK TABLES `conversation_members` WRITE;
 /*!40000 ALTER TABLE `conversation_members` DISABLE KEYS */;
+INSERT INTO `conversation_members` VALUES (1,1,'2026-10-22 20:13:43','2026-10-22 19:58:34'),(1,14,'2026-10-22 20:13:43','2026-10-22 20:18:03'),(2,1,'2026-10-22 22:29:37','2026-10-22 19:58:34'),(2,16,'2026-10-22 22:29:37','2026-10-22 17:12:36');
 /*!40000 ALTER TABLE `conversation_members` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -119,7 +122,7 @@ CREATE TABLE `conversations` (
   PRIMARY KEY (`id`),
   KEY `idx_conv_ride` (`ride_id`),
   CONSTRAINT `fk_conv_ride` FOREIGN KEY (`ride_id`) REFERENCES `rides` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -128,6 +131,7 @@ CREATE TABLE `conversations` (
 
 LOCK TABLES `conversations` WRITE;
 /*!40000 ALTER TABLE `conversations` DISABLE KEYS */;
+INSERT INTO `conversations` VALUES (1,'support',NULL,'ZenjiGO Support',1,'2026-10-22 20:13:43','2026-10-22 14:43:47'),(2,'support',NULL,'ZenjiGO Support',1,'2026-10-22 22:29:37','2026-10-22 16:59:57');
 /*!40000 ALTER TABLE `conversations` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -149,7 +153,7 @@ CREATE TABLE `device_tokens` (
   UNIQUE KEY `uq_device_token` (`token`),
   KEY `idx_device_user` (`user_id`),
   CONSTRAINT `fk_device_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -158,6 +162,7 @@ CREATE TABLE `device_tokens` (
 
 LOCK TABLES `device_tokens` WRITE;
 /*!40000 ALTER TABLE `device_tokens` DISABLE KEYS */;
+INSERT INTO `device_tokens` VALUES (1,16,'cgf8c5ZrR6qfNETLmdLRVv:APA91bFuXFkCPoBfWOM-CnWVy2AWYHT9B9l-imVPoMlYGIjN7AVwFPdoQM4neqrbmVf4etEIK4DywjjPLC-wb67HUHi__eNbU7vL0VoNJ0ovbCIGk61bJcw','android','2026-10-23 15:26:15','2026-10-23 10:14:17'),(2,14,'fKFTJjMpSEetgzJrQMlU84:APA91bG2UTJCQhqOlLkU__8YdOhi8lF1ufJ6ZHTwqYnyshpfhPD-rTmlsdZEqWg-DDN3qHrOGlWcqi5yGqRn1Zih9dOII1o-1wxDWOHVIt-oTbUqg2SkECs','android','2026-10-23 15:31:01','2026-10-23 10:16:03');
 /*!40000 ALTER TABLE `device_tokens` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -256,7 +261,7 @@ CREATE TABLE `driver_documents` (
   KEY `fk_docs_admin` (`verified_by`),
   CONSTRAINT `fk_docs_admin` FOREIGN KEY (`verified_by`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_docs_driver` FOREIGN KEY (`driver_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -265,6 +270,7 @@ CREATE TABLE `driver_documents` (
 
 LOCK TABLES `driver_documents` WRITE;
 /*!40000 ALTER TABLE `driver_documents` DISABLE KEYS */;
+INSERT INTO `driver_documents` VALUES (1,14,'drivers_license','zenjigo/drivers/pending/zuqvgjtvxzyqyos8ghin','https://res.cloudinary.com/hhzn7zmk/image/upload/v1792677467/zenjigo/drivers/pending/zuqvgjtvxzyqyos8ghin.png','image',NULL,'pending',NULL,NULL,NULL,'2026-10-22 19:27:54'),(2,14,'national_id','zenjigo/drivers/pending/fqdpmxx890ajygirm41m','https://res.cloudinary.com/hhzn7zmk/image/upload/v1792677468/zenjigo/drivers/pending/fqdpmxx890ajygirm41m.png','image',NULL,'pending',NULL,NULL,NULL,'2026-10-22 19:27:54'),(3,14,'insurance','zenjigo/drivers/pending/orpwippo4hvzbeugnufd','https://res.cloudinary.com/hhzn7zmk/image/upload/v1792677469/zenjigo/drivers/pending/orpwippo4hvzbeugnufd.png','image',NULL,'pending',NULL,NULL,NULL,'2026-10-22 19:27:54'),(4,14,'driver_photo','zenjigo/drivers/pending/qs5pezg4c4qqonxg4cxi','https://res.cloudinary.com/hhzn7zmk/image/upload/v1792677470/zenjigo/drivers/pending/qs5pezg4c4qqonxg4cxi.png','image',NULL,'pending',NULL,NULL,NULL,'2026-10-22 19:27:54'),(5,14,'vehicle_photo','zenjigo/drivers/pending/mxrzk9175c2hak7bcyfk','https://res.cloudinary.com/hhzn7zmk/image/upload/v1792677472/zenjigo/drivers/pending/mxrzk9175c2hak7bcyfk.png','image',NULL,'pending',NULL,NULL,NULL,'2026-10-22 19:27:54');
 /*!40000 ALTER TABLE `driver_documents` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -332,6 +338,7 @@ CREATE TABLE `driver_financials` (
 
 LOCK TABLES `driver_financials` WRITE;
 /*!40000 ALTER TABLE `driver_financials` DISABLE KEYS */;
+INSERT INTO `driver_financials` VALUES (14,0.00,0.00,0.00,0.00,0,0,NULL,NULL,NULL,'2026-10-22 19:51:27');
 /*!40000 ALTER TABLE `driver_financials` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -356,7 +363,7 @@ CREATE TABLE `driver_locations` (
   KEY `idx_location_ride_time` (`ride_id`,`recorded_at`),
   CONSTRAINT `fk_location_driver` FOREIGN KEY (`driver_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_location_ride` FOREIGN KEY (`ride_id`) REFERENCES `rides` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -365,6 +372,7 @@ CREATE TABLE `driver_locations` (
 
 LOCK TABLES `driver_locations` WRITE;
 /*!40000 ALTER TABLE `driver_locations` DISABLE KEYS */;
+INSERT INTO `driver_locations` VALUES (1,14,NULL,31.2550366,75.6962959,318.96,0.67,'2026-10-22 19:56:50'),(2,14,NULL,31.2549878,75.6962310,200.26,0.76,'2026-10-22 19:56:57'),(3,14,NULL,31.2550292,75.6963228,89.72,1.29,'2026-10-22 19:57:09'),(4,14,NULL,31.2551157,75.6962429,284.75,0.39,'2026-10-22 20:15:10'),(5,14,NULL,31.2544248,75.6966645,157.84,9.17,'2026-10-23 01:50:21'),(6,14,NULL,31.2548754,75.6963291,189.00,0.19,'2026-10-23 15:00:15'),(7,14,NULL,31.2547284,75.6963790,0.00,0.04,'2026-10-23 15:00:57'),(8,14,NULL,31.2547076,75.6963853,0.00,0.07,'2026-10-23 15:01:03'),(9,14,NULL,31.2548160,75.6961112,303.00,0.41,'2026-10-23 15:46:14'),(10,14,NULL,31.2549109,75.6961579,89.26,1.24,'2026-10-23 15:46:17'),(11,14,NULL,31.2550461,75.6962584,89.93,0.64,'2026-10-23 15:46:44'),(12,14,NULL,31.2550487,75.6962540,89.96,0.64,'2026-10-23 15:46:53'),(13,14,NULL,31.2551014,75.6962733,90.00,0.72,'2026-10-23 15:47:32'),(14,14,NULL,31.2551135,75.6962617,338.55,0.38,'2026-10-23 15:47:42'),(15,14,NULL,31.2550082,75.6961125,288.32,0.38,'2026-10-23 15:48:02'),(16,14,NULL,31.2549373,75.6960989,224.80,0.80,'2026-10-23 15:48:05'),(17,14,NULL,31.2545265,75.6965876,59.81,2.42,'2026-10-23 15:48:17'),(18,14,NULL,31.2544965,75.6966497,72.26,1.27,'2026-10-23 15:48:32'),(19,14,NULL,31.2544365,75.6965613,230.51,0.64,'2026-10-23 15:48:42'),(20,14,NULL,31.2549631,75.6961926,61.68,0.21,'2026-10-23 15:49:09');
 /*!40000 ALTER TABLE `driver_locations` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -381,6 +389,7 @@ CREATE TABLE `driver_payment_methods` (
   `provider` varchar(50) NOT NULL,
   `token` varchar(500) NOT NULL,
   `masked_account` varchar(100) DEFAULT NULL,
+  `phone` varchar(32) DEFAULT NULL,
   `is_default` tinyint(1) NOT NULL DEFAULT 0,
   `active` tinyint(1) NOT NULL DEFAULT 1,
   `is_autopay_default` tinyint(1) NOT NULL DEFAULT 0,
@@ -437,6 +446,7 @@ CREATE TABLE `driver_profiles` (
 
 LOCK TABLES `driver_profiles` WRITE;
 /*!40000 ALTER TABLE `driver_profiles` DISABLE KEYS */;
+INSERT INTO `driver_profiles` VALUES (14,'ZG-DRV-000014','TAE009090','Fuoni Kisimani','active',NULL,0,'2026-10-22 14:26:24',5.00,0,0.00,31.2549631,75.6961926,'2026-10-23 10:19:09');
 /*!40000 ALTER TABLE `driver_profiles` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -456,12 +466,16 @@ CREATE TABLE `driver_settlements` (
   `paid_amount` decimal(14,2) NOT NULL DEFAULT 0.00,
   `status` enum('pending','processing','paid','failed') NOT NULL DEFAULT 'pending',
   `provider` varchar(60) DEFAULT NULL,
+  `payment_method_id` bigint(20) unsigned DEFAULT NULL,
   `external_reference` varchar(190) DEFAULT NULL,
+  `failure_reason` varchar(255) DEFAULT NULL,
   `metadata` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`metadata`)),
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   `paid_at` datetime DEFAULT NULL,
+  `updated_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `idx_driver_settlement` (`driver_id`,`status`,`created_at`),
+  KEY `idx_settlement_external_ref` (`external_reference`),
   CONSTRAINT `fk_settlement_driver` FOREIGN KEY (`driver_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -499,7 +513,7 @@ CREATE TABLE `messages` (
   CONSTRAINT `fk_msg_conv` FOREIGN KEY (`conversation_id`) REFERENCES `conversations` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_msg_reply` FOREIGN KEY (`reply_to_id`) REFERENCES `messages` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_msg_sender` FOREIGN KEY (`sender_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -508,6 +522,7 @@ CREATE TABLE `messages` (
 
 LOCK TABLES `messages` WRITE;
 /*!40000 ALTER TABLE `messages` DISABLE KEYS */;
+INSERT INTO `messages` VALUES (1,1,14,'yow',NULL,0,0,'2026-10-22 20:13:47','2026-10-22 20:13:47'),(2,2,16,'yow',NULL,0,0,'2026-10-22 22:29:47','2026-10-22 22:29:47'),(3,2,16,'show',NULL,0,0,'2026-10-22 22:29:57','2026-10-22 22:29:57');
 /*!40000 ALTER TABLE `messages` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -530,7 +545,7 @@ CREATE TABLE `notifications` (
   PRIMARY KEY (`id`),
   KEY `idx_notifications_user` (`user_id`,`created_at`),
   CONSTRAINT `fk_notification_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -539,6 +554,7 @@ CREATE TABLE `notifications` (
 
 LOCK TABLES `notifications` WRITE;
 /*!40000 ALTER TABLE `notifications` DISABLE KEYS */;
+INSERT INTO `notifications` VALUES (1,14,'{\"type\":\"driver_status\",\"status\":\"active\",\"reason\"','Driver application update','Your application status is now: active','{}','2026-10-22 14:27:23','2026-10-22 19:56:24'),(2,16,'ride_accepted','Driver on the way','Your ZenjiGO driver accepted the ride and is heading to you.','{\"type\":\"ride_accepted\",\"rideId\":\"2\",\"status\":\"accepted\"}',NULL,'2026-10-23 15:47:38');
 /*!40000 ALTER TABLE `notifications` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -552,9 +568,10 @@ DROP TABLE IF EXISTS `otp_verifications`;
 CREATE TABLE `otp_verifications` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `target` varchar(190) NOT NULL,
-  `channel` enum('sms','whatsapp','email') NOT NULL DEFAULT 'sms',
+  `channel` enum('sms','whatsapp','email') NOT NULL DEFAULT 'email',
   `purpose` enum('login','signup','driver_registration','password_reset','admin_login') NOT NULL,
   `provider_sid` varchar(100) DEFAULT NULL,
+  `code_hash` char(64) DEFAULT NULL,
   `status` enum('pending','verified','expired','cancelled') NOT NULL DEFAULT 'pending',
   `attempts` int(11) NOT NULL DEFAULT 0,
   `last_sent_at` datetime DEFAULT NULL,
@@ -564,7 +581,7 @@ CREATE TABLE `otp_verifications` (
   PRIMARY KEY (`id`),
   KEY `idx_otp_target` (`target`,`purpose`,`status`),
   KEY `idx_otp_expires` (`expires_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=20 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -573,6 +590,7 @@ CREATE TABLE `otp_verifications` (
 
 LOCK TABLES `otp_verifications` WRITE;
 /*!40000 ALTER TABLE `otp_verifications` DISABLE KEYS */;
+INSERT INTO `otp_verifications` VALUES (1,'molittle1011@gmail.com','email','driver_registration','<d6155860-07f1-1ccc-97ca-5a0acc55bd7f@zenjigo.online>','2906201e7f5486b4fc87186e6f50aa2466f987e6c7da558ffc7991b2bb0438aa','cancelled',0,'2026-10-22 12:02:59','2026-10-22 12:12:59',NULL,'2026-10-22 17:32:59'),(2,'molittle1011@gmail.com','email','driver_registration','<628c6d95-ab3a-8452-7322-3249b6137b83@zenjigo.online>','8eea0e3637990b8a7fb0c2ad3eccb2214bc0e6f4f86c9c3b58ca631019f9e021','cancelled',0,'2026-10-22 13:27:49','2026-10-22 13:37:49',NULL,'2026-10-22 18:57:49'),(3,'molittle1011@gmail.com','email','driver_registration','<9fbba2f6-800c-b2e2-3636-df7422078a72@zenjigo.online>','7ab00dc9062585ed104e7507670bfc4cd3fd59e2e17f881b35d3cfcbebcde82e','verified',0,'2026-10-22 13:55:32','2026-10-22 14:05:32','2026-10-22 13:57:44','2026-10-22 19:25:32'),(4,'molittle1011@gmail.com','email','driver_registration','<2d7f8d6d-1e61-2bf4-f080-ba26a0d7b5cd@zenjigo.online>','9dc20dba8f7bba2630e7e378cbc319b3de3bf0c6f4b0df2517fd0ecd91a16639','cancelled',0,'2026-10-22 14:00:17','2026-10-22 14:10:17',NULL,'2026-10-22 19:30:17'),(5,'molittle1011@gmail.com','email','driver_registration','<66e04dd1-ba7d-966c-3814-883cf92ac04e@zenjigo.online>','1a312454ee2ab4277cae3e324d64bc6f5184d51f5fb04d809b9d99fe56fffc35','verified',0,'2026-10-22 14:01:25','2026-10-22 14:11:25','2026-10-22 14:02:14','2026-10-22 19:31:25'),(6,'molittle1011@gmail.com','email','login','<f8308371-c745-c845-c5b9-d2a2562deaba@zenjigo.online>','b6dd4d94e75fd7512ec6168f3920816530b7125521bc2b293620b92f10b2133c','cancelled',0,'2026-10-22 14:04:15','2026-10-22 14:14:15',NULL,'2026-10-22 19:34:15'),(7,'molittle1011@gmail.com','email','login','<94bae6ee-a13f-5bef-e996-c1a8503cf833@zenjigo.online>','356bd8e467e3d0f1cf497c93287aa430f5c95264491d79ff74c99f9d59c3a292','cancelled',0,'2026-10-22 14:05:24','2026-10-22 14:15:24',NULL,'2026-10-22 19:35:24'),(8,'molittle1011@gmail.com','email','login','<3fc7bfc5-800f-30b3-e5f3-220d7899b650@zenjigo.online>','19d18112574db8bf0fc408eef1ae02a0a0851a1d9bd288afd2658540668e98fd','cancelled',0,'2026-10-22 14:07:33','2026-10-22 14:17:33',NULL,'2026-10-22 19:37:33'),(9,'molittle1011@gmail.com','email','login','<71c5eb51-610a-f0c4-519d-e7cbf9e4d6d2@zenjigo.online>','5920115cc1adc040d26ddc3b0a111ba5bf42b9cde2bdfce24527007f22d7e7f9','verified',0,'2026-10-22 14:20:56','2026-10-22 14:30:56','2026-10-22 14:21:25','2026-10-22 19:50:56'),(10,'admin@zenjigo.online','email','admin_login','<bf76fcad-7aab-823f-3061-561dc1e7b524@zenjigo.online>','e8216ebc2640c192e5daf91346aacb6004d197fcaaa4b71f9caa45f61376f70d','verified',0,'2026-10-22 14:25:46','2026-10-22 14:35:46','2026-10-22 14:26:14','2026-10-22 19:55:46'),(11,'molittle1011@gmail.com','email','login','<d2761fee-04df-37a9-fcd6-fe285ec902a9@zenjigo.online>','a80eb0409256968b0f2cdbd9b6998fbb7b7f0a6ff5d818c2d6a0e21924f55b99','cancelled',1,'2026-10-22 14:59:25','2026-10-22 15:09:25',NULL,'2026-10-22 20:29:25'),(12,'molittle1011@gmail.com','email','login','<da28497b-cc52-2660-eb3d-08473cc9088f@zenjigo.online>','047a24e8831b6421c6216986b3e7a6619b240fd9dac49a064bbda63fad8dd538','verified',0,'2026-10-22 15:12:41','2026-10-22 15:22:41','2026-10-22 15:13:29','2026-10-22 20:42:41'),(13,'molittle1011@gmail.com','email','login','<c45485f3-4bf8-ca8b-f531-5d417d733382@zenjigo.online>','72c5a66f18e531767129c2244a2319c42422b052efbef3646dd65c9adb2886a1','verified',0,'2026-10-22 15:14:59','2026-10-22 15:24:59','2026-10-22 15:15:37','2026-10-22 20:44:59'),(14,'molittle1011@gmail.com','email','login','<b041b4c1-ca20-5635-465d-cd79fb2b6946@zenjigo.online>','100aa85a4e56c198ae8aaf21749f1278a38384d1215d40ec18a891fd5a1a5575','verified',0,'2026-10-22 16:46:57','2026-10-22 16:56:57','2026-10-22 16:47:18','2026-10-22 22:16:57'),(15,'molittle1011@gmail.com','email','login','<b849cf3f-76c0-8e5e-3110-d23ed937778c@zenjigo.online>','44fb59769bb039f4e648b6eed100d94fda78f6efe33732462ebcd37ea8a425a2','verified',1,'2026-10-22 16:49:15','2026-10-22 16:59:15','2026-10-22 16:50:25','2026-10-22 22:19:15'),(16,'molittle1011@gmail.com','email','login','<c998bd48-84e9-d36f-dac6-5a2119340ffa@zenjigo.online>','7f6356fa36c914fcddda935b5b649bc22a44303828ed33504e8c3c163a4ae86f','cancelled',0,'2026-10-22 16:54:38','2026-10-22 17:04:38',NULL,'2026-10-22 22:24:38'),(17,'molittle1011@gmail.com','email','login','<4ec4cc39-493f-9ed7-bc59-2da63f2ef294@zenjigo.online>','e78454c27345543ed3148b650e1c1744a20bba0cdbeb743fc7763a7da2323da2','verified',0,'2026-10-22 16:55:52','2026-10-22 17:05:52','2026-10-22 16:56:32','2026-10-22 22:25:52'),(18,'molittle1011@gmail.com','email','login','<c31e6ec8-6c44-6603-2292-78ec772dae2b@zenjigo.online>','6b3964edcaf63827d2e59feb36f9ef636d04c9f8d8bceee3f89d1754332add1e','verified',0,'2026-10-23 09:12:02','2026-10-23 09:22:02','2026-10-23 09:12:25','2026-10-23 14:42:02'),(19,'molittle1011@gmail.com','email','login','<493446ec-71c3-38f5-a523-b704b0871574@zenjigo.online>','69d748aae4457e2c48e750724bf88591ca68796e7e099939c7028542babf6a0c','verified',0,'2026-10-23 10:22:26','2026-10-23 10:32:26','2026-10-23 10:22:51','2026-10-23 15:52:26');
 /*!40000 ALTER TABLE `otp_verifications` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -850,7 +868,7 @@ CREATE TABLE `refresh_tokens` (
   UNIQUE KEY `uq_refresh_hash` (`token_hash`),
   KEY `idx_refresh_user` (`user_id`),
   CONSTRAINT `fk_refresh_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -859,6 +877,7 @@ CREATE TABLE `refresh_tokens` (
 
 LOCK TABLES `refresh_tokens` WRITE;
 /*!40000 ALTER TABLE `refresh_tokens` DISABLE KEYS */;
+INSERT INTO `refresh_tokens` VALUES (1,14,'dda2260126a73f41c385f846520fe6a65308c40a6aa5dd980e8f0976f6a6baf2','2026-11-21 14:21:25',NULL,'2026-10-22 19:51:25'),(2,1,'9a8ad90061f38d31e42d4790dc2fa2ba38e9fecd489dde6e8c37ad5b79c8bf84','2026-11-21 14:26:14',NULL,'2026-10-22 19:56:14'),(5,16,'b2ca78ecf3386dfe129500fffc7c9b1aa092b11552c964decd7c4ef71232efe6','2026-11-21 16:47:19',NULL,'2026-10-22 22:17:19'),(6,16,'64fb273308bc3db69207460ec8d96df6951c290f95044852081c7ea7bb2cde83','2026-11-21 16:50:25',NULL,'2026-10-22 22:20:25'),(7,16,'be7028fa7028e355432f2b4e19f0ec9a0f6c1273e990f7d5ec353992d68b98b3','2026-11-21 16:56:32',NULL,'2026-10-22 22:26:32'),(8,16,'470b7a484f20a6b1197727f6d353f4bd74c5897a008202b8f7ef3943666a2798','2026-11-22 09:12:25',NULL,'2026-10-23 14:42:25'),(9,16,'80d104b2ef0a6c67ff1ba5cd5658536784a220830dca0dc6b8f305fd1c9140af','2026-11-22 10:22:51',NULL,'2026-10-23 15:52:51');
 /*!40000 ALTER TABLE `refresh_tokens` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -881,7 +900,7 @@ CREATE TABLE `ride_events` (
   KEY `fk_ride_event_actor` (`actor_id`),
   CONSTRAINT `fk_ride_event_actor` FOREIGN KEY (`actor_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_ride_event_ride` FOREIGN KEY (`ride_id`) REFERENCES `rides` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -890,6 +909,7 @@ CREATE TABLE `ride_events` (
 
 LOCK TABLES `ride_events` WRITE;
 /*!40000 ALTER TABLE `ride_events` DISABLE KEYS */;
+INSERT INTO `ride_events` VALUES (1,1,16,'requested','{\"quote\":{\"distanceKm\":5682.77,\"durationMin\":12628,\"estimatedFare\":6380293,\"currency\":\"TZS\",\"distanceSource\":\"haversine\",\"fareBreakdown\":{\"baseFare\":2500,\"perKm\":900,\"perMinute\":100,\"bookingFee\":500,\"multiplier\":1}},\"priorDebtApplied\":0,\"silent\":true}','2026-10-23 15:45:47'),(2,1,16,'cancelled','{\"fee\":0,\"nearPickup\":false,\"distanceKm\":null,\"percent\":20,\"nearPickupKm\":1,\"driverCredited\":false}','2026-10-23 15:47:00'),(3,2,16,'requested','{\"quote\":{\"distanceKm\":5682.77,\"durationMin\":12628,\"estimatedFare\":9570440,\"currency\":\"TZS\",\"distanceSource\":\"haversine\",\"fareBreakdown\":{\"baseFare\":2500,\"perKm\":900,\"perMinute\":100,\"bookingFee\":500,\"multiplier\":1.5}},\"priorDebtApplied\":0,\"silent\":true}','2026-10-23 15:47:23'),(5,2,16,'cancelled','{\"fee\":0,\"nearPickup\":false,\"distanceKm\":null,\"percent\":20,\"nearPickupKm\":1,\"driverCredited\":false}','2026-10-23 15:49:22');
 /*!40000 ALTER TABLE `ride_events` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -988,6 +1008,7 @@ CREATE TABLE `rider_profiles` (
 
 LOCK TABLES `rider_profiles` WRITE;
 /*!40000 ALTER TABLE `rider_profiles` DISABLE KEYS */;
+INSERT INTO `rider_profiles` VALUES (16,NULL,NULL,'ZG000016',NULL,5.00,0,0.00);
 /*!40000 ALTER TABLE `rider_profiles` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1043,7 +1064,7 @@ CREATE TABLE `rides` (
   CONSTRAINT `fk_ride_driver` FOREIGN KEY (`driver_id`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_ride_rider` FOREIGN KEY (`rider_id`) REFERENCES `users` (`id`),
   CONSTRAINT `fk_ride_vehicle` FOREIGN KEY (`vehicle_id`) REFERENCES `vehicles` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1052,6 +1073,7 @@ CREATE TABLE `rides` (
 
 LOCK TABLES `rides` WRITE;
 /*!40000 ALTER TABLE `rides` DISABLE KEYS */;
+INSERT INTO `rides` VALUES (1,'ZGVKTDZEW575',16,NULL,NULL,'boda','7M4W+3H9, Chaheru, Punjab, India',31.2551124,75.6962948,'R73G+J79 KIBONDE MZUNGU, Zanzibar, Tanzania',-6.1959504,39.2757404,5682.77,12628,6380293.00,NULL,0.00,0.00,0,0.00,0.00,'cash',NULL,'cancelled','2968','Driver taking too long','2026-10-23 15:45:47',NULL,NULL,NULL,NULL,'2026-10-23 10:17:00','2026-10-23 15:45:47','2026-10-23 15:47:00'),(2,'ZGVKTG1IP690',16,NULL,NULL,'taxi','7M4W+3H9, Chaheru, Punjab, India',31.2551124,75.6962948,'R73G+J79 KIBONDE MZUNGU, Zanzibar, Tanzania',-6.1959504,39.2757404,5682.77,12628,9570440.00,NULL,0.00,0.00,0,0.00,0.00,'cash',NULL,'cancelled','8900','Driver taking too long','2026-10-23 15:47:23',NULL,NULL,NULL,NULL,'2026-10-23 10:19:22','2026-10-23 15:47:23','2026-10-23 15:49:22');
 /*!40000 ALTER TABLE `rides` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1109,7 +1131,7 @@ CREATE TABLE `schema_migrations` (
 
 LOCK TABLES `schema_migrations` WRITE;
 /*!40000 ALTER TABLE `schema_migrations` DISABLE KEYS */;
-INSERT INTO `schema_migrations` VALUES ('001_initial.sql','2026-10-01 04:35:33'),('002_business_rules.sql','2026-10-01 04:53:05'),('003_finance_hardening.sql','2026-10-01 04:53:05'),('004_schema_reconciliation.sql','2026-10-01 04:53:05');
+INSERT INTO `schema_migrations` VALUES ('001_initial.sql','2026-10-01 04:35:33'),('002_business_rules.sql','2026-10-01 04:53:05'),('003_finance_hardening.sql','2026-10-01 04:53:05'),('004_schema_reconciliation.sql','2026-10-01 04:53:05'),('005_nextsms_otp.sql','2026-10-19 22:37:40'),('006_email_otp_default.sql','2026-10-21 15:29:12'),('007_role_scoped_user_identity.sql','2026-10-21 15:55:01'),('008_user_archive.sql','2026-10-21 17:22:03'),('009_settlement_payment_flow.sql','2026-10-22 15:42:53');
 /*!40000 ALTER TABLE `schema_migrations` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1186,8 +1208,44 @@ CREATE TABLE `tour_packages` (
 
 LOCK TABLES `tour_packages` WRITE;
 /*!40000 ALTER TABLE `tour_packages` DISABLE KEYS */;
-INSERT INTO `tour_packages` VALUES (1,'Full-Day Island Tour','A customizable full-day Zanzibar island experience.',8.00,150000.00,4,'Confirm pickup point with the driver.',NULL,1,1,'2026-10-01 04:53:18','2026-10-01 04:53:18'),(2,'Nungwi Sunset Ride','Sunset trip with flexible pickup.',4.00,85000.00,4,'Pickup time should be confirmed before departure.',NULL,1,1,'2026-10-01 04:53:18','2026-10-01 04:53:18');
+INSERT INTO `tour_packages` VALUES (1,'Full-Day Island Tour','A customizable full-day Zanzibar island experience.',8.00,150000.00,4,'Confirm pickup point with the driver.',NULL,1,1,'2026-10-01 04:53:18','2026-10-01 04:53:18'),(2,'Nungwi Sunset Ride','Sunset trip with flexible pickup.',4.00,90000.00,4,'Pickup time should be confirmed before departure.',NULL,1,1,'2026-10-01 04:53:18','2026-10-21 14:43:15');
 /*!40000 ALTER TABLE `tour_packages` ENABLE KEYS */;
+UNLOCK TABLES;
+
+--
+-- Table structure for table `user_archives`
+--
+
+DROP TABLE IF EXISTS `user_archives`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `user_archives` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `original_user_id` bigint(20) unsigned NOT NULL,
+  `role` enum('rider','driver','admin') NOT NULL,
+  `full_name` varchar(120) NOT NULL,
+  `phone` varchar(32) NOT NULL,
+  `email` varchar(190) DEFAULT NULL,
+  `snapshot` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`snapshot`)),
+  `archived_by` bigint(20) unsigned DEFAULT NULL,
+  `archived_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `archive_reason` varchar(500) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_archive_original_user` (`original_user_id`),
+  KEY `idx_archive_role` (`role`),
+  KEY `idx_archive_phone` (`phone`),
+  KEY `idx_archive_email` (`email`),
+  KEY `idx_archive_archived_at` (`archived_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping data for table `user_archives`
+--
+
+LOCK TABLES `user_archives` WRITE;
+/*!40000 ALTER TABLE `user_archives` DISABLE KEYS */;
+/*!40000 ALTER TABLE `user_archives` ENABLE KEYS */;
 UNLOCK TABLES;
 
 --
@@ -1216,11 +1274,11 @@ CREATE TABLE `users` (
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   `updated_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_users_phone` (`phone`),
-  UNIQUE KEY `uq_users_email` (`email`),
+  UNIQUE KEY `uq_users_role_phone` (`role`,`phone`),
+  UNIQUE KEY `uq_users_role_email` (`role`,`email`),
   KEY `idx_users_role_status` (`role`,`status`),
   KEY `idx_users_created` (`created_at`)
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=17 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1229,7 +1287,7 @@ CREATE TABLE `users` (
 
 LOCK TABLES `users` WRITE;
 /*!40000 ALTER TABLE `users` DISABLE KEYS */;
-INSERT INTO `users` VALUES (1,'admin','ZenjiGO Administrator','+255677532140','admin@zenjigo.online','$2b$12$2UGjWp6fMhiK80O.WFlVze7cv4OGBxrpnl6qWIWL848Da5jPtLLtG',NULL,NULL,NULL,NULL,NULL,'active',NULL,'2026-09-30 23:23:18',NULL,'2026-10-01 04:53:18','2026-10-01 04:57:55');
+INSERT INTO `users` VALUES (1,'admin','ZenjiGO Administrator','+255677532140','admin@zenjigo.online','$2b$12$qSxha6Yg2WbH2ABHK59OwODHhcndUd11aSVMq3x1ldo7fEISrnuHa',NULL,NULL,NULL,NULL,NULL,'active','2026-10-21 09:12:09','2026-09-30 23:23:18','2026-10-22 14:26:14','2026-10-01 04:53:18','2026-10-22 19:56:14'),(14,'driver','Driver MO','+255677532140','molittle1011@gmail.com',NULL,NULL,NULL,NULL,NULL,NULL,'active',NULL,NULL,'2026-10-22 14:21:25','2026-10-22 19:27:54','2026-10-22 19:56:24'),(16,'rider','Rider MO','+255677532140','molittle1011@gmail.com',NULL,NULL,'Unguja','Fuoni',NULL,NULL,'active','2026-10-22 16:47:18',NULL,'2026-10-23 10:22:51','2026-10-22 22:17:18','2026-10-23 15:52:51');
 /*!40000 ALTER TABLE `users` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1256,7 +1314,7 @@ CREATE TABLE `vehicles` (
   UNIQUE KEY `uq_vehicle_plate` (`plate_number`),
   KEY `idx_vehicle_driver` (`driver_id`),
   CONSTRAINT `fk_vehicle_driver` FOREIGN KEY (`driver_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -1265,6 +1323,7 @@ CREATE TABLE `vehicles` (
 
 LOCK TABLES `vehicles` WRITE;
 /*!40000 ALTER TABLE `vehicles` DISABLE KEYS */;
+INSERT INTO `vehicles` VALUES (1,14,'taxi','ZNZ001','Nissan','Model1','Black',2010,'active','2026-10-22 19:27:54','2026-10-22 19:27:54');
 /*!40000 ALTER TABLE `vehicles` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -1327,6 +1386,7 @@ CREATE TABLE `wallets` (
 
 LOCK TABLES `wallets` WRITE;
 /*!40000 ALTER TABLE `wallets` DISABLE KEYS */;
+INSERT INTO `wallets` VALUES (16,0.00,'TZS','2026-10-22 22:17:18');
 /*!40000 ALTER TABLE `wallets` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
@@ -1339,4 +1399,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-01  5:01:01
+-- Dump completed on 2026-10-23 19:22:42
