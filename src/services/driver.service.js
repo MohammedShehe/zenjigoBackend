@@ -1,3 +1,4 @@
+const { notifyUser } = require('./notification.service');
 const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service'); const {sendWelcomeEmail}=require('./welcome-email.service');
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
 async function register(data,files){
@@ -111,12 +112,92 @@ async function setOnline(id,online){
  if(online){const d=await db.query(`SELECT application_status FROM driver_profiles WHERE user_id=?`,[id]);if(!d.length||d[0].application_status!=='active')throw ApiError.forbidden('Driver must be approved before going online.');}
  await db.query('UPDATE driver_profiles SET online=? WHERE user_id=?',[online?1:0,id]); return {online:!!online};
 }
-async function location(id,b){
- const r=await db.query('UPDATE driver_profiles SET current_lat=?,current_lng=?,location_updated_at=UTC_TIMESTAMP() WHERE user_id=?',[b.lat,b.lng,id]);
- if(!r.affectedRows)throw ApiError.notFound('Driver not found');
- await db.query('INSERT INTO driver_locations(driver_id,ride_id,lat,lng,heading,speed) VALUES(?,?,?,?,?,?)',[id,b.rideId||null,b.lat,b.lng,b.heading??null,b.speed??null]);
- return {lat:b.lat,lng:b.lng};
+/** Haversine km */
+function _km(a, b, c, d) {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (c - a) * rad, dLon = (d - b) * rad;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(a * rad) * Math.cos(c * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(x));
 }
+
+// Throttle live-tracking pushes per ride (ms)
+const _livePushAt = new Map();
+const LIVE_PUSH_INTERVAL_MS = Number(process.env.LIVE_TRACK_PUSH_INTERVAL_MS || 120000); // 2 min
+
+async function location(id, b) {
+  const lat = Number(b.lat);
+  const lng = Number(b.lng);
+  const r = await db.query(
+    'UPDATE driver_profiles SET current_lat=?,current_lng=?,location_updated_at=UTC_TIMESTAMP() WHERE user_id=?',
+    [lat, lng, id]
+  );
+  if (!r.affectedRows) throw ApiError.notFound('Driver not found');
+  const rideId = b.rideId || null;
+  await db.query(
+    'INSERT INTO driver_locations(driver_id,ride_id,lat,lng,heading,speed) VALUES(?,?,?,?,?,?)',
+    [id, rideId, lat, lng, b.heading ?? null, b.speed ?? null]
+  );
+
+  // Live tracking push to rider while on an active trip (works with app in background via FCM)
+  try {
+    let ride = null;
+    if (rideId) {
+      const rows = await db.query(
+        `SELECT id, rider_id, status, pickup_lat, pickup_lng, destination_lat, destination_lng
+         FROM rides WHERE id=? AND driver_id=? AND status IN ('accepted','arriving','arrived','started') LIMIT 1`,
+        [rideId, id]
+      );
+      ride = rows[0] || null;
+    } else {
+      const rows = await db.query(
+        `SELECT id, rider_id, status, pickup_lat, pickup_lng, destination_lat, destination_lng
+         FROM rides WHERE driver_id=? AND status IN ('accepted','arriving','arrived','started')
+         ORDER BY id DESC LIMIT 1`,
+        [id]
+      );
+      ride = rows[0] || null;
+    }
+    if (ride) {
+      const key = String(ride.id);
+      const now = Date.now();
+      const last = _livePushAt.get(key) || 0;
+      if (now - last >= LIVE_PUSH_INTERVAL_MS) {
+        _livePushAt.set(key, now);
+        const toPickup = ['accepted', 'arriving', 'arrived'].includes(ride.status);
+        const targetLat = toPickup ? Number(ride.pickup_lat) : Number(ride.destination_lat);
+        const targetLng = toPickup ? Number(ride.pickup_lng) : Number(ride.destination_lng);
+        if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
+          const km = _km(lat, lng, targetLat, targetLng);
+          const minutes = Math.max(1, Math.round((km / 0.45))); // ~27 km/h urban estimate
+          const title = toPickup ? 'Driver en route to you' : 'On the way to destination';
+          const body = toPickup
+            ? `About ${minutes} min · ${km.toFixed(1)} km to pickup`
+            : `About ${minutes} min · ${km.toFixed(1)} km to destination`;
+          await notifyUser(
+            ride.rider_id,
+            title,
+            body,
+            'live_tracking',
+            {
+              type: 'live_tracking',
+              rideId: String(ride.id),
+              status: ride.status,
+              minutes: String(minutes),
+              km: km.toFixed(1),
+              phase: toPickup ? 'pickup' : 'destination'
+            },
+            { skipDb: true } // avoid flooding notification inbox
+          );
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[live-track push]', e.message);
+  }
+
+  return { lat, lng };
+}
+
 async function earnings(id,from,to){
  const rows=await db.query(`SELECT DATE(completed_at) day,COUNT(*) rides,SUM(GREATEST(0,final_fare-discount+tip)) gross,SUM(GREATEST(0,final_fare-discount+tip))*? driver_share FROM rides WHERE driver_id=? AND status='completed' AND completed_at>=COALESCE(?,DATE_SUB(UTC_DATE(),INTERVAL 30 DAY)) AND completed_at<COALESCE(?,DATE_ADD(UTC_DATE(),INTERVAL 1 DAY)) GROUP BY DATE(completed_at) ORDER BY day DESC`,[(1-config.ride.driverCommission/100),id,from||null,to||null]);
  const total=rows.reduce((s,r)=>s+Number(r.driver_share||0),0); return {total:Number(total.toFixed(2)),days:rows};

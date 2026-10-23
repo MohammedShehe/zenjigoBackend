@@ -282,7 +282,22 @@ exports.driverStatus = asyncHandler(async (req, res) => {
   const msg = status === 'rejected' || status === 'suspended'
     ? `Your application was ${status}. Reason: ${reason}`
     : `Your application status is now: ${appStatus}`;
-  try { await notifyUser(id, 'Driver application update', msg, { type: 'driver_status', status: appStatus, reason: rejectionReason }); } catch (_) {}
+  try {
+    const titles = {
+      active: 'You are approved!',
+      approved: 'You are approved!',
+      rejected: 'Application rejected',
+      suspended: 'Account suspended',
+      under_review: 'Under review'
+    };
+    await notifyUser(
+      id,
+      titles[status] || 'Driver application update',
+      msg,
+      'driver_status',
+      { type: 'driver_status', status: appStatus, reason: rejectionReason || '' }
+    );
+  } catch (_) {}
   ok(res, { applicationStatus: appStatus, rejectionReason }, 'Driver status updated');
 });
 
@@ -312,6 +327,24 @@ exports.documentStatus = asyncHandler(async (req, res) => {
   );
   if (r.affectedRows === 0) throw ApiError.notFound('Document not found');
   await audit(req.user.sub, 'document_status', 'driver_document', req.params.id, { status, reason: rejectionReason });
+  // Notify the driver who owns this document
+  try {
+    const docs = await db.query('SELECT driver_id, type FROM driver_documents WHERE id=?', [req.params.id]);
+    if (docs.length) {
+      const body = status === 'approved'
+        ? `Your ${docs[0].type || 'document'} was approved.`
+        : status === 'rejected'
+          ? `Your ${docs[0].type || 'document'} was rejected. ${rejectionReason || ''}`.trim()
+          : `Your ${docs[0].type || 'document'} is pending review.`;
+      await notifyUser(
+        docs[0].driver_id,
+        status === 'approved' ? 'Document approved' : status === 'rejected' ? 'Document rejected' : 'Document update',
+        body,
+        'document_status',
+        { type: 'document_status', documentId: String(req.params.id), status }
+      );
+    }
+  } catch (_) {}
   ok(res, { status, rejectionReason }, 'Document status updated');
 });
 
@@ -635,6 +668,17 @@ exports.createPromo = asyncHandler(async (req, res) => {
     ]
   );
   await audit(req.user.sub, 'create_promo', 'promo', r.insertId, { code: b.code });
+  try {
+    const { notifyMany, allRiderIds } = require('../services/notification.service');
+    const riders = await allRiderIds();
+    await notifyMany(
+      riders,
+      'Special offer',
+      b.title || `Promo ${b.code} is live — save on your next ride.`,
+      'promo',
+      { type: 'promo', code: String(b.code || '') }
+    );
+  } catch (_) {}
   ok(res, { id: r.insertId }, 'Promotion created', 201);
 });
 
@@ -694,6 +738,11 @@ exports.createTour = asyncHandler(async (req, res) => {
     ]
   );
   await audit(req.user.sub, 'create_tour', 'tour_package', r.insertId);
+  try {
+    const { notifyMany, allRiderIds } = require('../services/notification.service');
+    const riders = await allRiderIds();
+    await notifyMany(riders, 'New tour package', b.name || 'A new ZenjiGO tour is available.', 'tour_new', { type: 'tour_new', tourId: String(r.insertId) });
+  } catch (_) {}
   ok(res, { id: r.insertId }, 'Tour package created', 201);
 });
 
@@ -718,6 +767,11 @@ exports.updateTour = asyncHandler(async (req, res) => {
     ]
   );
   await audit(req.user.sub, 'update_tour', 'tour_package', id, b);
+  try {
+    const { notifyMany, allRiderIds } = require('../services/notification.service');
+    const riders = await allRiderIds();
+    await notifyMany(riders, 'Tour package updated', b.name || 'A ZenjiGO tour was updated.', 'tour_updated', { type: 'tour_updated', tourId: String(id) });
+  } catch (_) {}
   ok(res, null, 'Tour package updated');
 });
 

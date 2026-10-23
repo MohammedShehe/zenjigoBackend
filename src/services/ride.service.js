@@ -2,6 +2,7 @@ const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
 const config = require('../config/env');
 const { sendPush } = require('../config/firebase');
+const { notifyUser } = require('./notification.service');
 const finance = require('./driver_finance.service');
 
 function haversine(a, b, c, d) {
@@ -221,7 +222,7 @@ async function accept(driverId,rideId){
   await conn.query(`UPDATE rides SET driver_id=?,vehicle_id=?,status='accepted',accepted_at=UTC_TIMESTAMP() WHERE id=? AND status='searching'`,[driverId,dp[0].vehicle_id,rideId]);
   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,driverId,'accepted']);
   const rider=(await conn.query('SELECT rider_id FROM rides WHERE id=?',[rideId]))[0][0];
-  await pushUser(rider.rider_id,'Driver assigned','Your ZenjiGO driver accepted the ride.',{type:'ride_status',rideId});
+  await pushUser(rider.rider_id,'Driver on the way','Your ZenjiGO driver accepted the ride and is heading to you.',{type:'ride_accepted',rideId:String(rideId),status:'accepted'});
   return getById(rideId,driverId);
  });
 }
@@ -260,7 +261,35 @@ async function setStatus(driverId,rideId,status){
     }
     await conn.query('UPDATE rider_profiles SET total_rides=total_rides+1 WHERE user_id=?',[rider]);
   }
-  await pushUser(rider,status==='completed'?'Ride completed':`Ride ${status}`,status==='completed'?'Your ride is complete.':`Your driver status is now ${status}.`,{type:'ride_status',rideId});
+  const statusTitles = {
+    arriving: 'Driver is on the way',
+    arrived: 'Driver has arrived',
+    started: 'Trip started',
+    completed: 'Ride completed',
+    cancelled: 'Ride cancelled'
+  };
+  const statusBodies = {
+    arriving: 'Your driver is coming to the pickup point.',
+    arrived: 'Your driver is at the pickup location.',
+    started: 'Enjoy your ZenjiGO trip.',
+    completed: 'Thanks for riding with ZenjiGO. Rate your trip!',
+    cancelled: 'Your driver cancelled this ride.'
+  };
+  await pushUser(
+    rider,
+    statusTitles[status] || `Ride ${status}`,
+    statusBodies[status] || `Your ride is now ${status}.`,
+    { type: 'ride_status', rideId: String(rideId), status: String(status) }
+  );
+  // Notify driver on complete
+  if (status === 'completed' && driverId) {
+    await pushUser(
+      driverId,
+      'Trip completed',
+      'Fare recorded. Check Earnings for details.',
+      { type: 'ride_completed', rideId: String(rideId) }
+    );
+  }
   return getById(rideId,driverId);
  });
  if(status==='completed'){
@@ -411,7 +440,10 @@ async function chargeWallet(userId,amount,type,refId,description){
   const before=Number(w[0].balance),after=before-amount; await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,userId]); await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[userId,type,-amount,before,after,type,refId,'wallet',description]); return after;
  });
 }
-async function pushUser(userId,title,body,data){const t=await db.query('SELECT token FROM device_tokens WHERE user_id=?',[userId]); await sendPush(t.map(x=>x.token),{title,body},data);}
+async function pushUser(userId, title, body, data = {}) {
+  const type = (data && data.type) || 'system';
+  await notifyUser(userId, title, body, type, data);
+}
 
 /** Preview cancellation fee without applying it (same rules as cancelRider). */
 async function cancelPreview(riderId, rideId) {
