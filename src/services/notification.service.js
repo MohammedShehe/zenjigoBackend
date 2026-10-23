@@ -41,7 +41,24 @@ async function notifyUser(userId, title, body, type = 'system', data = {}, opts 
   try {
     const tokens = await tokensFor(userId);
     if (tokens.length) {
-      await sendPush(tokens, { title, body }, { type, ...(data || {}) });
+      const result = await sendPush(tokens, { title, body }, { type, ...(data || {}) });
+      if (result.failureCount > 0) {
+        // Remove tokens that Firebase explicitly reports as no longer registered.
+        const stale = (result.failures || [])
+          .filter((failure) => failure.code === 'messaging/registration-token-not-registered')
+          .map((failure) => failure.token)
+          .filter(Boolean);
+        if (stale.length) {
+          await db.query(
+            `DELETE FROM device_tokens WHERE token IN (${stale.map(() => '?').join(',')})`,
+            stale
+          );
+          console.warn(`[notify] Removed ${stale.length} expired device token(s).`);
+        }
+        console.warn(`[notify] FCM result for user ${userId}: ${result.successCount} succeeded, ${result.failureCount} failed.`);
+      } else if (result.successCount > 0) {
+        console.log(`[notify] FCM accepted push for user ${userId} (${result.successCount} device(s)).`);
+      }
     }
   } catch (e) {
     console.warn('[notify] push failed', e.message);

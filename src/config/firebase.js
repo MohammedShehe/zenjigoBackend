@@ -29,7 +29,11 @@ function getFirebase() {
  */
 async function sendPush(tokens, notification, data = {}) {
   const firebase = getFirebase();
-  if (!firebase || !tokens?.length) return { successCount: 0, failureCount: 0 };
+  if (!firebase) {
+    console.warn('[FCM] Firebase Admin is not configured; push was not sent.');
+    return { successCount: 0, failureCount: tokens?.length || 0, skipped: true };
+  }
+  if (!tokens?.length) return { successCount: 0, failureCount: 0 };
   const unique = [...new Set(tokens.filter(Boolean))];
   if (!unique.length) return { successCount: 0, failureCount: 0 };
 
@@ -63,7 +67,25 @@ async function sendPush(tokens, notification, data = {}) {
       }
     }
   });
-  return { successCount: result.successCount, failureCount: result.failureCount };
+  const failures = [];
+  result.responses.forEach((response, index) => {
+    if (!response.success) {
+      failures.push({
+        token: unique[index],
+        code: response.error?.code || 'messaging/unknown-error'
+      });
+    }
+  });
+  if (failures.length) {
+    console.warn(`[FCM] Delivery failures: ${failures.length}/${unique.length}; codes: ${
+      [...new Set(failures.map((failure) => failure.code))].join(', ')
+    }`);
+  }
+  return {
+    successCount: result.successCount,
+    failureCount: result.failureCount,
+    failures
+  };
 }
 
 module.exports = { admin, getFirebase, sendPush };
