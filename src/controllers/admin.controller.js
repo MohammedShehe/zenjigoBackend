@@ -104,7 +104,24 @@ exports.drivers = asyncHandler(async (req, res) => {
            d.driver_code driverCode, d.application_status applicationStatus, d.rejection_reason rejectionReason,
            d.online, d.rating, d.total_rides totalRides, d.total_earnings totalEarnings, d.approved_at approvedAt,
            d.national_id nationalId, d.home_address homeAddress,
-           v.type vehicleType, v.plate_number plateNumber, v.make, v.model, v.color, v.model_year year
+           v.type vehicleType, v.plate_number plateNumber, v.make, v.model, v.color, v.model_year year,
+           (
+             SELECT MIN(dd.expires_at) FROM driver_documents dd
+             WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
+               AND dd.status IN ('approved','verified','pending')
+           ) nearestDocExpiry,
+           (
+             SELECT COUNT(*) FROM driver_documents dd
+             WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
+               AND dd.expires_at < UTC_DATE()
+               AND dd.status IN ('approved','verified','pending')
+           ) expiredDocsCount,
+           (
+             SELECT COUNT(*) FROM driver_documents dd
+             WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
+               AND dd.expires_at BETWEEN UTC_DATE() AND DATE_ADD(UTC_DATE(), INTERVAL 30 DAY)
+               AND dd.status IN ('approved','verified','pending')
+           ) expiringSoonCount
     FROM users u
     JOIN driver_profiles d ON d.user_id=u.id
     LEFT JOIN vehicles v ON v.id = (
@@ -182,6 +199,26 @@ exports.createDriver = asyncHandler(async (req, res) => {
         'active'
       ]
     );
+
+    // Optional document metadata (files uploaded later via driver detail / upload API)
+    const docEntries = [];
+    if (b.licenseNumber || b.licenseExpiresAt) {
+      docEntries.push(['drivers_license', b.licenseNumber || null, b.licenseExpiresAt || null]);
+    }
+    if (b.nationalId || b.nationalIdExpiresAt) {
+      docEntries.push(['national_id', b.nationalId || null, b.nationalIdExpiresAt || null]);
+    }
+    if (b.insuranceNumber || b.insuranceExpiresAt) {
+      docEntries.push(['insurance', b.insuranceNumber || null, b.insuranceExpiresAt || null]);
+    }
+    for (const [dtype, ref, exp] of docEntries) {
+      await conn.query(
+        `INSERT INTO driver_documents(driver_id, document_type, url, status, expires_at)
+         VALUES(?,?,?,?,?)`,
+        [u.insertId, dtype, 'pending-upload://' + (ref || dtype), 'pending', exp || null]
+      ).catch(() => {});
+    }
+
     return u.insertId;
   });
   await audit(req.user.sub, 'create_driver', 'user', id, { fullName: b.fullName, phone: b.phone });
