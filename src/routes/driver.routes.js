@@ -6,5 +6,12 @@ router.get('/parcels/pending', extra.pendingParcels);
 router.post('/parcels/:id/accept', extra.acceptParcel);
 router.get('/tours/pending', extra.pendingTours);
 router.post('/tours/:id/accept', extra.acceptTour);
+router.get('/reviews', c.reviews);
+router.get('/change-requests', c.listChangeRequests);
+router.post('/change-requests/profile', c.requestProfileChange);
+router.post('/change-requests/vehicle', c.requestVehicleChange);
+router.post('/change-requests/document', upload.fields([{ name: 'document', maxCount: 1 }]), c.requestDocumentUpdate);
+router.post('/profile-photo', upload.single('photo'), c.updateProfilePhoto);
+router.delete('/profile-photo', c.removeProfilePhoto);
 
 module.exports=router;

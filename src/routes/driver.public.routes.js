@@ -27,4 +27,15 @@ router.post(
   c.register
 );
 
+router.get('/application-status/:driverId', c.applicationStatus);
+
+const places = require('../controllers/places.controller');
+router.get('/places/autocomplete', places.placesAutocomplete);
+router.get('/places/details', places.placeDetails);
+
+router.post('/bootstrap-session', c.bootstrapSession);
+
 module.exports = router;
+
+
+

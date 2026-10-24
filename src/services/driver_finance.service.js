@@ -490,9 +490,9 @@ async function configureAutopay(driverId, enabled, provider, providerToken, meta
       await q(conn, 'UPDATE driver_payment_methods SET is_autopay_default=0 WHERE driver_id=?', [driverId]);
       await q(
         conn,
-        `INSERT INTO driver_payment_methods(driver_id,provider,method_type,account_label,masked_account,phone,provider_token,is_autopay_default,active)
-         VALUES(?,?,?,?,?,?,?,1,1)`,
-        [driverId, provider || config.payment.provider, metadata.methodType || 'momo', metadata.accountLabel || 'Autopay method', metadata.maskedAccount || null, metadata.phone || null, providerToken]
+        `INSERT INTO driver_payment_methods(driver_id,provider,token,masked_account,phone,is_autopay_default,active,is_default)
+         VALUES(?,?,?,?,?,1,1,1)`,
+        [driverId, provider || config.payment.provider, providerToken, metadata.maskedAccount || null, metadata.phone || null]
       );
     } else {
       await q(conn, 'UPDATE driver_payment_methods SET is_autopay_default=0 WHERE driver_id=?', [driverId]);
@@ -507,7 +507,7 @@ async function tryAutopay(driverId) {
   try {
     const f = await state(driverId);
     const methodRows = await db.query(
-      'SELECT * FROM driver_payment_methods WHERE driver_id=? AND active=1 AND provider_token=? ORDER BY id DESC LIMIT 1',
+      'SELECT * FROM driver_payment_methods WHERE driver_id=? AND active=1 AND token=? ORDER BY id DESC LIMIT 1',
       [driverId, f.autopay_reference]
     );
     if (!methodRows.length) return { status: 'pending', reason: 'No matching autopay payment method' };
@@ -518,15 +518,21 @@ async function tryAutopay(driverId) {
 }
 
 async function addPaymentMethod(driverId, b) {
-  if (!b.provider || !b.providerToken || !b.methodType) throw ApiError.badRequest('provider, providerToken and methodType are required.');
-  if (!['momo', 'bank', 'card'].includes(b.methodType)) throw ApiError.badRequest('methodType must be momo, bank or card.');
+  const provider = b.provider || 'momo';
+  const token = b.providerToken || b.token;
+  if (!token) throw ApiError.badRequest('providerToken (mandate reference) is required.');
+  const phone = b.phone || null;
+  const masked = b.maskedAccount || (phone && phone.length > 4 ? ('****' + phone.slice(-4)) : null);
+  if (b.isAutopayDefault) {
+    await db.query('UPDATE driver_payment_methods SET is_autopay_default=0, is_default=0 WHERE driver_id=?', [driverId]);
+  }
   const r = await db.query(
-    `INSERT INTO driver_payment_methods(driver_id,provider,method_type,account_label,masked_account,phone,provider_token,is_autopay_default)
-     VALUES(?,?,?,?,?,?,?,?)`,
-    [driverId, b.provider, b.methodType, b.accountLabel || null, b.maskedAccount || null, b.phone || null, b.providerToken, b.isAutopayDefault ? 1 : 0]
+    `INSERT INTO driver_payment_methods(driver_id,provider,token,masked_account,phone,is_autopay_default,active,is_default)
+     VALUES(?,?,?,?,?,?,1,?)`,
+    [driverId, provider, token, masked, phone, b.isAutopayDefault ? 1 : 0, b.isAutopayDefault ? 1 : 0]
   );
   return (await db.query(
-    'SELECT id,driver_id,provider,method_type,account_label,masked_account,phone,is_autopay_default,created_at FROM driver_payment_methods WHERE id=?',
+    'SELECT id,driver_id,provider,token,masked_account,phone,is_autopay_default,is_default,active,created_at FROM driver_payment_methods WHERE id=?',
     [r.insertId]
   ))[0];
 }

@@ -1,3 +1,4 @@
+const { signAccess, issueRefreshToken } = require('../utils/jwt');
 const { notifyUser } = require('./notification.service');
 const db=require('../config/db'); const ApiError=require('../utils/ApiError'); const {normalizePhone}=require('../utils/phone'); const {upload}=require('./upload.service'); const {hashPassword}=require('../utils/hash'); const {publicUser}=require('./auth.service'); const config=require('../config/env'); const otp=require('./otp.service'); const {sendWelcomeEmail}=require('./welcome-email.service');
 function code(id){return `ZG-DRV-${String(id).padStart(6,'0')}`;}
@@ -61,7 +62,9 @@ async function register(data,files){
      // Use a temporary subfolder; we will rewrite public_id path conceptually via folder after we know id
      // Using a shared pending folder is fine; Cloudinary folder is just organization.
      const u = await upload(f, `${folderBase}/pending`);
-     uploaded.push({ type: docType, publicId: u.publicId, url: u.url, resourceType: u.resourceType });
+     const expKey = `expires_${key}`;
+     const expiresAt = data[expKey] || data[`expires${key.charAt(0).toUpperCase()+key.slice(1)}`] || null;
+     uploaded.push({ type: docType, publicId: u.publicId, url: u.url, resourceType: u.resourceType, expiresAt });
    }
  }
  if (uploaded.length < 4) {
@@ -85,8 +88,8 @@ async function register(data,files){
    );
    for (const u of uploaded) {
      await conn.query(
-       'INSERT INTO driver_documents(driver_id,document_type,public_id,url,resource_type,status) VALUES(?,?,?,?,?,"pending")',
-       [id, u.type, u.publicId, u.url, u.resourceType]
+       'INSERT INTO driver_documents(driver_id,document_type,public_id,url,resource_type,status,expires_at) VALUES(?,?,?,?,?,"pending",?)',
+       [id, u.type, u.publicId, u.url, u.resourceType, u.expiresAt || null]
      );
    }
    return id;
@@ -95,12 +98,40 @@ async function register(data,files){
  try { await sendWelcomeEmail({ email: emailTarget, name: data.fullName, role: 'driver' }); }
  catch (err) { console.error('[WELCOME EMAIL] Failed to send driver welcome email:', err.message); }
 
+ // Issue session tokens immediately so the driver app can call authenticated
+ // endpoints (profile, documents, photo) while the application is under review.
+ const accessToken = signAccess({ sub: result, role: 'driver' });
+ const refreshToken = await issueRefreshToken(result, 'driver');
+ const userRows = await db.query(
+   `SELECT u.id,u.full_name,u.phone,u.email,u.photo_url,u.status,u.role,d.application_status,d.driver_code,d.online,d.rating
+    FROM users u LEFT JOIN driver_profiles d ON d.user_id=u.id WHERE u.id=? LIMIT 1`,
+   [result]
+ );
+ const u = userRows[0] || { id: result, role: 'driver' };
  return {
    driverId: result,
    driverCode: code(result),
    documents: uploaded.map(u => ({ type: u.type, url: u.url })),
    status: 'pending',
-   applicationStatus: 'pending'
+   applicationStatus: 'pending',
+   accessToken,
+   refreshToken,
+   user: {
+     id: u.id,
+     role: 'driver',
+     fullName: u.full_name,
+     full_name: u.full_name,
+     phone: u.phone,
+     email: u.email,
+     photoUrl: u.photo_url,
+     photo_url: u.photo_url,
+     status: u.status,
+     application_status: u.application_status || 'pending',
+     applicationStatus: u.application_status || 'pending',
+     driver_code: u.driver_code,
+     online: !!u.online,
+     rating: u.rating != null ? Number(u.rating) : null,
+   },
  };
 }
 async function profile(id){
@@ -209,4 +240,212 @@ async function payout(id,b){
  const available=Number(p[0].total_earnings)-Number(paid[0].total); if(amount>available)throw ApiError.badRequest('Requested payout exceeds available earnings.');
  const r=await db.query('INSERT INTO payout_requests(driver_id,amount,method,account_details) VALUES(?,?,?,?)',[id,amount,b.method,JSON.stringify(b.accountDetails||{})]); return {id:r.insertId,status:'pending'};
 }
-module.exports={register,profile,documents,setOnline,location,earnings,payout};
+
+
+async function ensureChangeRequestsTable() {
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS driver_change_requests (
+      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      driver_id BIGINT NOT NULL,
+      request_type VARCHAR(32) NOT NULL,
+      field_name VARCHAR(64) NOT NULL,
+      new_value TEXT,
+      reason TEXT,
+      status VARCHAR(32) DEFAULT 'pending',
+      rejection_reason TEXT,
+      meta JSON,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX (driver_id), INDEX (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  } catch (e) { console.warn('[ensureChangeRequestsTable]', e.message); }
+}
+
+async function applicationStatus(driverId){
+  const id = Number(driverId);
+  if(!id) throw ApiError.badRequest('Invalid driver id');
+  const rows = await db.query(
+    `SELECT u.id, u.status AS user_status, dp.application_status, dp.rejection_reason, dp.rating, dp.total_rides
+     FROM users u LEFT JOIN driver_profiles dp ON dp.user_id=u.id
+     WHERE u.id=? AND u.role='driver' LIMIT 1`, [id]
+  );
+  if(!rows.length) throw ApiError.notFound('Application not found');
+  const r = rows[0];
+  return {
+    driverId: r.id,
+    applicationStatus: r.application_status || 'Pending',
+    userStatus: r.user_status,
+    rejectionReason: r.rejection_reason || null,
+    rating: r.rating != null ? Number(r.rating) : null,
+  };
+}
+
+async function reviews(driverId){
+  try {
+    const rows = await db.query(
+      `SELECT rt.id, rt.stars AS rating, rt.feedback AS comment, rt.created_at,
+              COALESCE(u.full_name, 'Rider') AS rider_name,
+              u.photo_url AS rider_photo
+       FROM ratings rt
+       JOIN rides r ON r.id = rt.ride_id
+       LEFT JOIN users u ON u.id = rt.from_user_id
+       WHERE rt.to_user_id=? OR r.driver_id=?
+       ORDER BY rt.created_at DESC LIMIT 50`, [driverId, driverId]
+    );
+    return rows.map(x => ({
+      id: x.id,
+      rating: Number(x.rating),
+      comment: x.comment || null,
+      createdAt: x.created_at,
+      riderName: x.rider_name,
+      riderPhoto: x.rider_photo || null,
+    }));
+  } catch (e) {
+    console.warn('[reviews]', e.message);
+    return [];
+  }
+}
+
+async function requestProfileChange(driverId, body){
+  await ensureChangeRequestsTable();
+  const field = String(body.field || '').trim();
+  const newValue = String(body.newValue || '').trim();
+  const reason = String(body.reason || '').trim();
+  if(!field || !newValue) throw ApiError.badRequest('field and newValue are required');
+  const allowed = ['full_name','phone','email','home_address','national_id'];
+  if(!allowed.includes(field)) throw ApiError.badRequest('Unsupported field');
+  try {
+    const r = await db.query(
+      `INSERT INTO driver_change_requests(driver_id, request_type, field_name, new_value, reason, status)
+       VALUES(?,?,?,?,?,'pending')`,
+      [driverId, 'profile', field, newValue, reason || null]
+    );
+    return { id: r.insertId, status: 'pending' };
+  } catch (e) {
+    if (String(e.message||'').includes("doesn't exist")) {
+      throw ApiError.badRequest('Change requests table not ready. Contact support.');
+    }
+    throw e;
+  }
+}
+
+async function requestDocumentUpdate(driverId, body, files){
+  await ensureChangeRequestsTable();
+  const docType = String(body.documentType || body.type || '').trim();
+  const reason = String(body.reason || '').trim();
+  if(!docType) throw ApiError.badRequest('documentType is required');
+  let url = null, publicId = null, resourceType = 'image';
+  if(files && files.document && files.document[0]){
+    const up = await upload(files.document[0], `drivers/${driverId}/docs`);
+    url = up.url; publicId = up.public_id; resourceType = up.resource_type || 'image';
+  }
+  const expiresAt = body.expiresAt || body.expirationDate || null;
+  const r = await db.query(
+    `INSERT INTO driver_change_requests(driver_id, request_type, field_name, new_value, reason, status, meta)
+     VALUES(?,?,?,?,?,'pending',?)`,
+    [driverId, 'document', docType, url || '', reason || null, JSON.stringify({ publicId, resourceType, expiresAt })]
+  );
+  return { id: r.insertId, status: 'pending' };
+}
+
+async function requestVehicleChange(driverId, body){
+  await ensureChangeRequestsTable();
+  const reason = String(body.reason || '').trim();
+  const payload = {
+    vehicleType: body.vehicleType || null,
+    plateNumber: body.plateNumber || null,
+    vehicleMake: body.vehicleMake || null,
+    vehicleModel: body.vehicleModel || null,
+    vehicleColor: body.vehicleColor || null,
+    modelYear: body.modelYear || null,
+  };
+  if(!Object.values(payload).some(Boolean)) throw ApiError.badRequest('Provide at least one vehicle field');
+  const r = await db.query(
+    `INSERT INTO driver_change_requests(driver_id, request_type, field_name, new_value, reason, status)
+     VALUES(?,?,?,?,?,'pending')`,
+    [driverId, 'vehicle', 'vehicle_details', JSON.stringify(payload), reason || null]
+  );
+  return { id: r.insertId, status: 'pending' };
+}
+
+async function listChangeRequests(driverId){
+  await ensureChangeRequestsTable();
+  try {
+    return await db.query(
+      `SELECT id, request_type, field_name, new_value, reason, status, rejection_reason, created_at, updated_at
+       FROM driver_change_requests WHERE driver_id=? ORDER BY id DESC LIMIT 50`, [driverId]
+    );
+  } catch (_) { return []; }
+}
+
+async function updateProfilePhoto(driverId, file){
+  if(!file) throw ApiError.badRequest('Photo file is required');
+  const up = await upload(file, `drivers/${driverId}/photo`);
+  // photo_url lives on users (driver_profiles has no photo_url column)
+  await db.query('UPDATE users SET photo_url=? WHERE id=?', [up.url, driverId]);
+  return { photoUrl: up.url, photo_url: up.url };
+}
+
+async function removeProfilePhoto(driverId){
+  await db.query('UPDATE users SET photo_url=NULL WHERE id=?', [driverId]);
+  return { photoUrl: null, photo_url: null };
+}
+
+
+/**
+ * Exchange driverId + email for a session when the application is approved/active
+ * (or still pending — allows finishing onboarding without a second OTP).
+ */
+async function bootstrapSession({ driverId, email }) {
+  const id = Number(driverId);
+  const mail = String(email || '').trim().toLowerCase();
+  if (!id || !mail) throw ApiError.badRequest('driverId and email are required');
+  const rows = await db.query(
+    `SELECT u.id,u.full_name,u.phone,u.email,u.photo_url,u.status,u.role,d.application_status,d.driver_code,d.online,d.rating
+     FROM users u JOIN driver_profiles d ON d.user_id=u.id
+     WHERE u.id=? AND u.role='driver' AND LOWER(u.email)=? LIMIT 1`,
+    [id, mail]
+  );
+  if (!rows.length) throw ApiError.unauthorized('Driver not found for this email');
+  const u = rows[0];
+  if (u.status === 'suspended' || u.status === 'rejected') {
+    throw ApiError.forbidden('This account is suspended or rejected.');
+  }
+  // Mark user active if application approved so refresh tokens work
+  const appStatus = String(u.application_status || '').toLowerCase();
+  if ((appStatus === 'approved' || appStatus === 'active') && u.status !== 'active') {
+    await db.query(`UPDATE users SET status='active' WHERE id=?`, [id]);
+    u.status = 'active';
+  }
+  if (appStatus === 'approved') {
+    await db.query(`UPDATE driver_profiles SET application_status='active' WHERE user_id=?`, [id]).catch(() => {});
+    u.application_status = 'active';
+  }
+  const accessToken = signAccess({ sub: u.id, role: 'driver' });
+  const refreshToken = await issueRefreshToken(u.id, 'driver');
+  return {
+    accessToken,
+    refreshToken,
+    user: {
+      id: u.id,
+      role: 'driver',
+      fullName: u.full_name,
+      full_name: u.full_name,
+      phone: u.phone,
+      email: u.email,
+      photoUrl: u.photo_url,
+      photo_url: u.photo_url,
+      status: u.status,
+      application_status: u.application_status,
+      applicationStatus: u.application_status,
+      driver_code: u.driver_code,
+      online: !!u.online,
+      rating: u.rating != null ? Number(u.rating) : null,
+    },
+    driverId: u.id,
+    applicationStatus: u.application_status,
+  };
+}
+
+module.exports={register,profile,documents,setOnline,location,earnings,payout,applicationStatus,reviews,requestProfileChange,requestDocumentUpdate,requestVehicleChange,listChangeRequests,updateProfilePhoto,removeProfilePhoto,bootstrapSession};
+

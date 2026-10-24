@@ -63,3 +63,5 @@ const config=require('../config/env');
   console.error(e);
   process.exit(1);
 });
+
+/* change requests table ensured by runtime if missing */

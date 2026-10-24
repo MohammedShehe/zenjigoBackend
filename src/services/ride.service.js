@@ -221,9 +221,24 @@ async function accept(driverId,rideId){
   if(!dp.length) throw ApiError.forbidden('Driver is not online or has no active matching vehicle.');
   await conn.query(`UPDATE rides SET driver_id=?,vehicle_id=?,status='accepted',accepted_at=UTC_TIMESTAMP() WHERE id=? AND status='searching'`,[driverId,dp[0].vehicle_id,rideId]);
   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,driverId,'accepted']);
-  const rider=(await conn.query('SELECT rider_id FROM rides WHERE id=?',[rideId]))[0][0];
-  await pushUser(rider.rider_id,'Driver on the way','Your ZenjiGO driver accepted the ride and is heading to you.',{type:'ride_accepted',rideId:String(rideId),status:'accepted'});
-  return getById(rideId,driverId);
+  let riderId = null;
+  try {
+    const [riderRows] = await conn.query('SELECT rider_id FROM rides WHERE id=?',[rideId]);
+    riderId = riderRows && riderRows[0] ? riderRows[0].rider_id : null;
+  } catch (_) {}
+  // Commit first, then notify — never fail the accept response because of push/getById
+  return { id: Number(rideId), status: 'accepted', riderId };
+ }).then(async (accepted) => {
+  try {
+    if (accepted && accepted.riderId) {
+      await pushUser(accepted.riderId,'Driver on the way','Your ZenjiGO driver accepted the ride and is heading to you.',{type:'ride_accepted',rideId:String(accepted.id),status:'accepted'});
+    }
+  } catch (e) { console.warn('[accept push]', e.message); }
+  try {
+    return await getById(accepted.id, driverId);
+  } catch (_) {
+    return accepted;
+  }
  });
 }
 async function setStatus(driverId,rideId,status){

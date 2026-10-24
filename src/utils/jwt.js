@@ -13,7 +13,8 @@ async function issueRefreshToken(userId, role){
 async function rotateRefreshToken(raw){
   const hash=hashToken(raw);
   const rows=await db.query('SELECT rt.id,rt.user_id,rt.expires_at,u.role,u.status FROM refresh_tokens rt JOIN users u ON u.id=rt.user_id WHERE rt.token_hash=? AND rt.revoked_at IS NULL LIMIT 1',[hash]);
-  if(!rows.length || new Date(rows[0].expires_at)<=new Date() || rows[0].status!=='active') return null;
+  if(!rows.length || new Date(rows[0].expires_at)<=new Date()) return null;
+  if(rows[0].status==='suspended' || rows[0].status==='rejected' || rows[0].status==='banned') return null;
   await db.query('UPDATE refresh_tokens SET revoked_at=UTC_TIMESTAMP() WHERE id=?',[rows[0].id]);
   const access=signAccess({sub:rows[0].user_id,role:rows[0].role});
   const refresh=await issueRefreshToken(rows[0].user_id,rows[0].role);
