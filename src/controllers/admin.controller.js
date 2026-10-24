@@ -946,3 +946,30 @@ exports.permanentDeleteArchive = asyncHandler(async (req, res) => {
   await audit(req.user.sub, 'permanent_delete_user', 'user_archive', req.params.id, result);
   ok(res, result, 'Archived user permanently deleted');
 });
+
+/** List driver reports submitted by riders */
+exports.driverReports = asyncHandler(async (req, res) => {
+  try {
+    const rows = await db.query(
+      `SELECT r.*, 
+              reporter.full_name reporter_name, reporter.phone reporter_phone,
+              driver.full_name driver_name, driver.phone driver_phone
+       FROM driver_reports r
+       LEFT JOIN users reporter ON reporter.id = r.reporter_id
+       LEFT JOIN users driver ON driver.id = r.driver_id
+       ORDER BY r.id DESC LIMIT 200`
+    );
+    ok(res, rows);
+  } catch (e) {
+    ok(res, []);
+  }
+});
+
+exports.updateDriverReport = asyncHandler(async (req, res) => {
+  const status = req.body.status;
+  if (!['open', 'reviewed', 'dismissed'].includes(status)) {
+    throw ApiError.badRequest('Invalid status');
+  }
+  await db.query('UPDATE driver_reports SET status=? WHERE id=?', [status, req.params.id]);
+  ok(res, null, 'Report updated');
+});

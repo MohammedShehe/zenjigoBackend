@@ -47,4 +47,5 @@ router.post('/admin/verify-otp', [body('email').isEmail(), body('code').isLength
 router.post('/refresh', [body('refreshToken').notEmpty()], validate, c.refresh);
 router.post('/logout', c.logout);
 
+// Authenticated rider email change is under /rider/me (user routes) or public otp below
 module.exports = router;

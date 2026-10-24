@@ -95,4 +95,6 @@ router.get('/archives/:id', c.archive);
 router.post('/archives/:id/restore', c.restoreArchive);
 router.delete('/archives/:id', c.permanentDeleteArchive);
 
+router.get('/driver-reports', c.driverReports);
+router.patch('/driver-reports/:id', c.updateDriverReport);
 module.exports = router;
