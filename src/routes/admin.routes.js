@@ -6,8 +6,14 @@ const { validate } = require('../utils/validation');
 // Dashboard
 router.get('/dashboard', c.dashboard);
 
+// Current admin
+router.get('/me', c.me);
+router.patch('/me', c.updateMe);
+router.post('/me/password', c.changeMyPassword);
+
 // Riders
 router.get('/riders', c.riders);
+router.get('/riders/:id', c.rider);
 router.post('/riders', c.createRider);
 router.patch('/riders/:id', c.updateRider);
 router.patch('/riders/:id/status', c.riderStatus);
@@ -25,6 +31,11 @@ router.delete('/drivers/:id', c.deleteDriver);
 router.patch('/documents/:id/status', [
   body('status').isIn(['approved', 'rejected', 'pending'])
 ], validate, c.documentStatus);
+router.get('/documents', c.documents);
+router.get('/change-requests', c.changeRequests);
+router.patch('/change-requests/:id', [
+  body('status').isIn(['approved', 'rejected'])
+], validate, c.reviewChangeRequest);
 router.post('/drivers/:id/settle', c.settleDriver);
 router.get('/driver-finance', c.driverFinance);
 
@@ -53,8 +64,8 @@ router.get('/fare-settings', c.fareSettings);
 router.patch('/fare-settings', c.updateFareSettings);
 router.get('/cancel-settings', c.cancelSettings);
 router.patch('/cancel-settings', c.updateCancelSettings);
-router.get('/cancel-settings', c.cancelSettings);
-router.patch('/cancel-settings', c.updateCancelSettings);
+router.get('/settlements', c.settlements);
+router.get('/wallet-transactions', c.walletTransactions);
 
 // Promos
 router.get('/promos', c.promos);
@@ -70,6 +81,8 @@ router.delete('/tour-packages/:id', c.deleteTour);
 
 // Parcels
 router.get('/parcels', c.parcels);
+router.get('/tour-bookings', c.tourBookings);
+router.get('/ratings', c.ratings);
 
 // Notifications
 router.get('/notifications', c.notifications);

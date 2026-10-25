@@ -200,6 +200,28 @@ app.get('/health', async (req, res) => {
 |--------------------------------------------------------------------------
 */
 
+// The admin console is a static SPA. It needs a slightly different CSP from the JSON API
+// (map tiles + Leaflet from unpkg); everything else stays locked to same-origin.
+app.use('/admin', (req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "script-src 'self' https://unpkg.com",
+      "style-src 'self' 'unsafe-inline' https://unpkg.com",
+      "img-src 'self' data: blob: https:",
+      "font-src 'self' data:",
+      "connect-src 'self'",
+      "frame-src 'self' https://res.cloudinary.com https://docs.google.com",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'"
+    ].join('; ')
+  );
+  res.setHeader('Cache-Control', 'no-cache');
+  next();
+});
 app.use(
   '/admin',
   express.static(

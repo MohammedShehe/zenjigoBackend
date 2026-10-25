@@ -1,661 +1,218 @@
 (() => {
-'use strict';
+  'use strict';
+  const Z = window.Z; const { html, raw, ico, $, $$, setHtml, F } = Z;
 
-const API = window.ZenjiGOAdminAPI;
-const D = window.ZENJIGO_DATA;
-const $ = (s) => document.querySelector(s);
-const $$ = (s) => [...document.querySelectorAll(s)];
+  /* ---------------- Theme ---------------- */
+  const theme = { get() { try { return localStorage.getItem('zg_theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch (_) { return 'light'; } },
+    set(t) { document.documentElement.dataset.theme = t; try { localStorage.setItem('zg_theme', t); } catch (_) {} const b = $('#themeBtn'); if (b) setHtml(b, ico(t === 'dark' ? 'sun' : 'moon')); } };
+  theme.set(theme.get());
 
-const money = (n) => 'TZS ' + Number(n || 0).toLocaleString();
-const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const statusClass = (s) => /active|success|completed|verified|delivered|confirmed|approved|paid/i.test(s) ? 'success'
-  : /pending|review|assigned|arriving|searching|due|investigating|under_review/i.test(s) ? 'warning'
-  : /cancel|reject|restrict|critical|failed|suspended/i.test(s) ? 'danger' : 'info';
-const badge = (s) => `<span class="status ${statusClass(s)}">${esc(String(s || '—').replace(/_/g, ' '))}</span>`;
-const userCell = (name, sub = '', tone = 'blue') => {
-  const initials = String(name || '?').split(/\s+/).map((x) => x[0]).slice(0, 2).join('').toUpperCase();
-  return `<div class="table-user"><div class="avatar avatar-${tone}">${esc(initials)}</div><div><b>${esc(name)}</b><span>${esc(sub)}</span></div></div>`;
-};
+  /* ---------------- Navigation model ---------------- */
+  const NAV = [
+    { group: 'Overview', items: [
+      { k: 'dashboard', l: 'Dashboard', i: 'grid' },
+      { k: 'live', l: 'Live operations', i: 'radio', q: (q) => q.activeRides, tone: '' } ] },
+    { group: 'Operations', items: [
+      { k: 'rides', l: 'Rides', i: 'car' },
+      { k: 'drivers', l: 'Drivers', i: 'id', q: (q) => q.driverApplications, tone: 'warn' },
+      { k: 'documents', l: 'Document review', i: 'fileCheck', q: (q) => q.documents, tone: 'warn' },
+      { k: 'requests', l: 'Driver requests', i: 'inbox', q: (q) => q.changeRequests, tone: 'warn' },
+      { k: 'riders', l: 'Riders', i: 'users' },
+      { k: 'parcels', l: 'Parcels', i: 'package', q: (q) => q.parcels, tone: 'warn' },
+      { k: 'tours', l: 'Tours', i: 'compass', q: (q) => q.tourBookings, tone: 'warn' } ] },
+    { group: 'Money', items: [
+      { k: 'finance', l: 'Finance', i: 'wallet', q: (q) => q.payments, tone: 'warn' },
+      { k: 'withdrawals', l: 'Driver payouts', i: 'cash', q: (q) => q.payouts, tone: 'warn' },
+      { k: 'promotions', l: 'Promotions', i: 'tag' } ] },
+    { group: 'Care & safety', items: [
+      { k: 'support', l: 'Support inbox', i: 'chat', q: (q) => q.supportUnread, tone: '' },
+      { k: 'reports', l: 'Safety reports', i: 'flag', q: (q) => q.reports, tone: 'danger' },
+      { k: 'notifications', l: 'Notifications', i: 'bell' } ] },
+    { group: 'Platform', items: [
+      { k: 'pricing', l: 'Pricing & policy', i: 'sliders' },
+      { k: 'admins', l: 'Admins & access', i: 'shield' },
+      { k: 'audit', l: 'Audit log', i: 'clock' },
+      { k: 'archive', l: 'Archive', i: 'archive' },
+      { k: 'settings', l: 'My account', i: 'gear' } ] }
+  ];
+  const ALL = NAV.flatMap((g) => g.items);
+  Z.queues = {}; Z.me = null;
 
-function toast(msg, type = 'success') {
-  const id = 't' + Date.now();
-  $('#toastHost').insertAdjacentHTML('beforeend',
-    `<div id="${id}" class="toast border-0 shadow-sm" role="alert"><div class="toast-body d-flex align-items-center gap-2">
-      <i class="bi ${type === 'danger' ? 'bi-exclamation-circle-fill text-danger' : 'bi-check-circle-fill text-success'}"></i>
-      <span class="flex-grow-1">${esc(msg)}</span>
-      <button class="btn-close" data-bs-dismiss="toast"></button></div></div>`);
-  const el = $('#' + id);
-  new bootstrap.Toast(el, { delay: 3200 }).show();
-  el.addEventListener('hidden.bs.toast', () => el.remove());
-}
-window.toast = toast;
-
-function loadBtn(btn) {
-  if (!btn) return Promise.resolve();
-  btn.classList.add('is-loading');
-  btn.disabled = true;
-  return {
-    done() { btn.classList.remove('is-loading'); btn.disabled = false; }
-  };
-}
-
-function makeOtp(host) {
-  if (!host) return;
-  host.innerHTML = '';
-  for (let i = 0; i < 6; i++) {
-    host.insertAdjacentHTML('beforeend', `<input class="form-control otp" maxlength="1" inputmode="numeric" aria-label="OTP digit ${i + 1}">`);
+  /* ---------------- Auth view ---------------- */
+  const root = $('#root');
+  function renderAuth(note) {
+    setHtml(root, html`<div class="auth">
+      <aside class="auth-art"><div class="logo"><img src="assets/img/zenjigo-icon.png" alt="">ZenjiGO</div>
+        <div><h1>Run every ride, driver and payment from one console.</h1><p class="lead">The ZenjiGO operations console is restricted to authorised administrators. Every action is recorded in the audit log.</p>
+          <div class="auth-points"><div>${ico('shieldCheck')}<p><b>Two-step verification</b><span>Password plus a one-time code sent to your email.</span></p></div>
+          <div>${ico('fileCheck')}<p><b>Driver verification</b><span>Review documents and change requests before drivers go live.</span></p></div>
+          <div>${ico('wallet')}<p><b>Finance control</b><span>Payments, commissions and payouts with a full ledger.</span></p></div></div></div>
+        <footer>© ${new Date().getFullYear()} ZenjiGO · Ride Anywhere in Zanzibar</footer></aside>
+      <main class="auth-panel"><div class="auth-card" id="authCard"></div></main></div>`);
+    loginStep(note);
   }
-  [...host.children].forEach((inp, i) => {
-    inp.addEventListener('input', () => {
-      inp.value = inp.value.replace(/\D/g, '').slice(0, 1);
-      if (inp.value && i < 5) host.children[i + 1].focus();
-    });
-    inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Backspace' && !inp.value && i > 0) host.children[i - 1].focus();
-    });
-    inp.addEventListener('paste', (e) => {
-      const v = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6);
-      if (v.length) {
-        e.preventDefault();
-        v.split('').forEach((c, j) => { if (host.children[j]) host.children[j].value = c; });
-        host.children[Math.min(v.length, 6) - 1].focus();
-      }
-    });
-  });
-}
-
-/* ---------- Auth ---------- */
-function showAuth(name) {
-  $$('.auth-step').forEach((x) => x.classList.remove('active'));
-  const el = $('#authStep' + name[0].toUpperCase() + name.slice(1));
-  if (el) el.classList.add('active');
-}
-
-async function enterApp() {
-  $('#authView')?.classList.add('d-none');
-  $('#adminApp')?.classList.remove('d-none');
-  const s = API.session();
-  if (s?.admin || s?.user || s?.fullName || s?.email) {
-    const name = s.fullName || s.admin?.fullName || s.user?.fullName || 'Super Admin';
-    const email = s.email || s.admin?.email || s.user?.email || '';
-    const av = $$('.top-profile b, .top-profile span');
-    if (av[0]) av[0].textContent = name;
-    if (av[1]) av[1].textContent = email;
-  }
-  await syncAll();
-  renderPage('dashboard');
-}
-
-async function signOut() {
-  await API.logout();
-  $('#adminApp')?.classList.add('d-none');
-  $('#authView')?.classList.remove('d-none');
-  showAuth('login');
-  $$('.otp').forEach((x) => (x.value = ''));
-  toast('Signed out securely.');
-}
-
-/* ---------- Data sync ---------- */
-async function syncAll() {
-  try {
-    const [
-      dashboard, rides, drivers, riders, admins, promos, payments, payouts,
-      tours, parcels, notifications, conversations, audit, commissions, finance, settings, commissionSettings
-    ] = await Promise.all([
-      API.get('/admin/dashboard').catch(() => ({})),
-      API.get('/admin/rides').catch(() => []),
-      API.get('/admin/drivers').catch(() => []),
-      API.get('/admin/riders').catch(() => []),
-      API.get('/admin/admins').catch(() => []),
-      API.get('/admin/promos').catch(() => []),
-      API.get('/admin/payments').catch(() => []),
-      API.get('/admin/payouts').catch(() => []),
-      API.get('/admin/tour-packages').catch(() => []),
-      API.get('/admin/parcels').catch(() => []),
-      API.get('/admin/notifications').catch(() => []),
-      API.get('/admin/conversations').catch(() => []),
-      API.get('/admin/audit-logs').catch(() => []),
-      API.get('/admin/commissions').catch(() => []),
-      API.get('/admin/driver-finance').catch(() => []),
-      API.get('/admin/settings').catch(() => ({})),
-      API.get('/admin/commission-settings').catch(() => ({ cycleLimit: 60000, percent: 20 }))
-    ]);
-
-    D.dashboard = dashboard || {};
-    D.rides = (rides || []).map(mapRide);
-    D.drivers = (drivers || []).map(mapDriver);
-    D.riders = (riders || []).map(mapRider);
-    D.admins = (admins || []).map(mapAdmin);
-    D.promos = (promos || []).map(mapPromo);
-    D.payments = payments || [];
-    D.payouts = (payouts || []).map(mapPayout);
-    D.tours = (tours || []).map(mapTour);
-    D.parcels = (parcels || []).map(mapParcel);
-    D.notifications = notifications || [];
-    updateIndicators();
-    D.conversations = conversations || [];
-    D.audit = audit || [];
-    D.commissions = commissions || [];
-    D.finance = finance || [];
-    D.settings = settings || {};
-    D.commissionSettings = commissionSettings || { cycleLimit: 60000, percent: 20 };
-  } catch (e) {
-    toast('Backend sync failed: ' + e.message, 'danger');
-  }
-}
-window.syncAll = syncAll;
-
-function mapRide(r) {
-  return {
-    id: r.ride_code || r.id, dbId: r.id,
-    rider: r.riderName || '—', driver: r.driverName || '—',
-    type: String(r.ride_type || '').replace(/^./, (x) => x.toUpperCase()),
-    from: r.pickup_address, to: r.destination_address,
-    fare: Number(r.final_fare ?? r.estimated_fare ?? 0),
-    status: r.status, payment: r.payment_method || 'Cash',
-    time: r.created_at ? new Date(r.created_at).toLocaleString() : '—',
-    pin: r.trip_pin || '—',
-    distance: (r.estimated_distance_km || 0) + ' km'
-  };
-}
-function mapDriver(d) {
-  return {
-    id: d.id, dbId: d.id, code: d.driverCode || d.id,
-    name: d.fullName, phone: d.phone, email: d.email || '—',
-    vehicle: d.vehicleType || '—', plate: d.plateNumber || '—',
-    type: (d.vehicleType || '—').replace(/^./, (x) => x.toUpperCase()),
-    rating: Number(d.rating || 0).toFixed(1),
-    rides: d.totalRides || 0, earnings: d.totalEarnings || 0,
-    status: d.applicationStatus || d.status, online: !!d.online,
-    userStatus: d.status, make: d.make || '', model: d.model || '', color: d.color || ''
-  };
-}
-function mapRider(r) {
-  return {
-    id: r.id, name: r.fullName, phone: r.phone, email: r.email || '—',
-    island: r.island || '—', area: r.district || r.region || r.ward || '—',
-    rides: r.totalRides || 0, wallet: Number(r.walletBalance || 0),
-    status: r.status, rating: Number(r.rating || 0).toFixed(1)
-  };
-}
-function mapAdmin(a) {
-  return {
-    id: a.id, name: a.fullName, phone: a.phone || '—', email: a.email,
-    status: a.status, created: a.createdAt ? new Date(a.createdAt).toLocaleString() : '—',
-    lastLogin: a.lastLoginAt ? new Date(a.lastLoginAt).toLocaleString() : '—'
-  };
-}
-function mapPromo(p) {
-  return {
-    id: p.id, code: p.code, description: p.description || p.title,
-    discount: p.discount_type === 'percent' ? p.discount_value + '%' : money(p.discount_value),
-    discountType: p.discount_type, discountValue: p.discount_value,
-    service: p.applies_to, usage: (p.usage_count || 0) + ' / ' + (p.usage_limit || '∞'),
-    status: p.is_active ? 'Active' : 'Paused',
-    validFrom: p.valid_from, validUntil: p.valid_until
-  };
-}
-function mapPayout(p) {
-  return {
-    id: p.id, driver: p.driverName, method: p.method, account: p.account_details || '',
-    amount: Number(p.amount || 0), status: p.status,
-    requested: p.created_at ? new Date(p.created_at).toLocaleString() : '—'
-  };
-}
-function mapTour(t) {
-  return {
-    id: t.id, name: t.name, description: t.description || '',
-    price: Number(t.base_price || 0), duration: t.duration_hours,
-    max: t.max_tourists, status: t.is_active ? 'Active' : 'Paused'
-  };
-}
-function mapParcel(p) {
-  return {
-    id: p.parcel_code || p.id, dbId: p.id,
-    rider: p.riderName, driver: p.driverName || '—',
-    pickup: p.pickup_address, drop: p.delivery_address,
-    weight: (p.weight_kg || 0) + ' kg', status: p.status,
-    time: p.created_at ? new Date(p.created_at).toLocaleString() : '—'
-  };
-}
-
-function updateIndicators() {
-  const counts = { live: (D.rides || []).filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).length, drivers: (D.drivers || []).filter(d => /pending|review/i.test(d.status || '')).length, withdrawals: (D.payouts || []).filter(p => /pending/i.test(p.status || '')).length, chat: (D.conversations || []).filter(c => Number(c.unreadCount || c.unread_count || 0) > 0).length, reports: (D.rides || []).filter(r => /cancel|failed|incident|dispute/i.test(r.status || '')).length, notifications: (D.notifications || []).length };
-  Object.entries(counts).forEach(([page, count]) => { const link = document.querySelector(`.nav-link[data-page="${page}"]`); if (!link) return; let badgeEl = link.querySelector('.nav-badge'); if (count > 0) { if (!badgeEl) { badgeEl = document.createElement('em'); badgeEl.className = 'nav-badge'; link.appendChild(badgeEl); } badgeEl.textContent = count > 99 ? '99+' : String(count); } else if (badgeEl) badgeEl.remove(); });
-  const bell = document.querySelector('.notification-btn span'); if (bell) { const unread = (D.notifications || []).filter(n => !(n.read_at || n.readAt)).length; bell.textContent = unread > 0 ? (unread > 99 ? '99+' : String(unread)) : ''; bell.classList.toggle('has-count', unread > 0); bell.setAttribute('aria-label', `${unread} notifications`); }
-}
-
-/* ---------- Navigation ---------- */
-let currentPage = 'dashboard';
-
-const PAGE_META = {
-  dashboard: ['Dashboard', 'Platform health and operations overview'],
-  rides: ['Rides', 'All ride activity and lifecycle'],
-  drivers: ['Drivers', 'Applications, fleet and performance'],
-  riders: ['Riders', 'Accounts, wallets and history'],
-  admins: ['Admins', 'Super admin and sub-admin accounts'],
-  parcels: ['Parcels', 'Parcel bookings and delivery status'],
-  tours: ['Tours', 'Tour packages and availability'],
-  finance: ['Finance', 'Payments, commissions and ledger'],
-  withdrawals: ['Withdrawals', 'Driver payout requests'],
-  promotions: ['Promotions', 'Promo codes and incentives'],
-  notifications: ['Notifications', 'System and admin messages'],
-  chat: ['Support', 'Conversations and support threads'],
-  audit: ['Audit log', 'Administrative actions trail'],
-  pricing: ['Pricing & commission', 'Fare and commission configuration'],
-  settings: ['Settings', 'Platform configuration'],
-  live: ['Live Operations', 'Current rides, drivers and operational activity'],
-  reports: ['Reports & Safety', 'Review operational activity and safety indicators']
-};
-
-function renderPage(page) {
-  currentPage = page;
-  $$('.nav-link[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
-  const meta = PAGE_META[page] || [page, ''];
-  if ($('#pageTitle')) $('#pageTitle').textContent = meta[0];
-  if ($('#pageSubtitle')) $('#pageSubtitle').textContent = meta[1];
-  const content = $('#content');
-  if (!content) return;
-  const fn = window.AdminPages?.[page];
-  content.innerHTML = fn ? fn() : `<div class="card-x p-4"><p>Page not available.</p></div>`;
-  updateIndicators();
-  bindPageEvents();
-}
-window.renderPage = renderPage;
-window.renderCurrent = () => renderPage(currentPage);
-
-/* ---------- Table helpers ---------- */
-function tableWrap(title, actionsHtml, headHtml, bodyHtml, emptyMsg) {
-  return `<div class="card-x">
-    <div class="card-head d-flex flex-wrap justify-content-between align-items-center gap-2">
-      <div><h6 class="mb-0">${esc(title)}</h6></div>
-      <div class="d-flex flex-wrap gap-2">${actionsHtml || ''}</div>
-    </div>
-    <div class="table-responsive">
-      <table class="table table-hover align-middle mb-0">
-        <thead><tr>${headHtml}</tr></thead>
-        <tbody>${bodyHtml || `<tr><td colspan="12" class="text-center text-muted py-4">${esc(emptyMsg || 'No records')}</td></tr>`}</tbody>
-      </table>
-    </div>
-  </div>`;
-}
-
-function toolbar(searchId, extra = '') {
-  return `<div class="toolbar d-flex flex-wrap gap-2 mb-3">
-    <div class="global-search flex-grow-1" style="max-width:320px"><i class="bi bi-search"></i>
-      <input id="${searchId}" placeholder="Filter table..."></div>
-    ${extra}
-  </div>`;
-}
-
-/* ---------- Pages ---------- */
-window.AdminPages = {
-  live() {
-    return toolbar('liveSearch', '<button class="btn btn-outline-primary" id="btnRefreshLive"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button>') + tableWrap('Live ride operations', '', '<th>Ride</th><th>Rider</th><th>Driver</th><th>Route</th><th>Status</th><th>Started</th>', D.rides.filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).map(r => `<tr data-search="${esc((r.id+' '+r.rider+' '+r.driver+' '+r.from+' '+r.to+' '+r.status).toLowerCase())}"><td><b>${esc(r.id)}</b></td><td>${esc(r.rider)}</td><td>${esc(r.driver)}</td><td>${esc(r.from)} → ${esc(r.to)}</td><td>${badge(r.status)}</td><td>${esc(r.time)}</td></tr>`).join(''), 'No active rides right now.');
-  },
-  reports() {
-    const active = D.rides.filter(r => !/completed|cancelled|canceled|failed/i.test(r.status || '')).length;
-    const pending = D.drivers.filter(d => /pending|review/i.test(d.status || '')).length;
-    const suspended = D.riders.filter(r => /suspended|restricted/i.test(r.status || '')).length + D.drivers.filter(d => /suspended|rejected/i.test(d.status || '')).length;
-    return `<div class="row g-3 mb-3"><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Active rides</small><h3>${active}</h3></div></div><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Driver applications to review</small><h3>${pending}</h3></div></div><div class="col-12 col-md-4"><div class="card-x p-3"><small class="text-muted">Restricted accounts</small><h3>${suspended}</h3></div></div></div>` + toolbar('reportsSearch') + tableWrap('Safety and operational review', '', '<th>Category</th><th>Reference</th><th>Person / detail</th><th>Status</th><th>Time</th>', [...D.drivers.filter(d => /pending|review|suspended|rejected/i.test(d.status || '')).map(d => ({category:'Driver review',id:d.id,name:d.name,status:d.status,time:'—'})), ...D.rides.filter(r => /cancel|failed|incident|dispute/i.test(r.status || '')).map(r => ({category:'Ride follow-up',id:r.id,name:(r.rider+' / '+r.driver),status:r.status,time:r.time}))].map(x => `<tr data-search="${esc((x.category+' '+x.id+' '+x.name+' '+x.status).toLowerCase())}"><td>${esc(x.category)}</td><td>${esc(x.id)}</td><td>${esc(x.name)}</td><td>${badge(x.status)}</td><td>${esc(x.time)}</td></tr>`).join(''), 'No review items found in the currently available records.');
-  },
-  dashboard() {
-    const d = D.dashboard || {};
-    const cards = [
-      ['Users', d.users || 0, 'bi-people'],
-      ['Riders', d.riders || 0, 'bi-person'],
-      ['Drivers', d.drivers || 0, 'bi-scooter'],
-      ['Admins', d.admins || 0, 'bi-shield-lock'],
-      ["Today's rides", d.todayRides || 0, 'bi-geo-alt'],
-      ['Active rides', d.activeRides || 0, 'bi-activity'],
-      ['Pending apps', d.pendingDriverApplications || 0, 'bi-hourglass-split'],
-      ["Today's revenue", money(d.todayRevenue || 0), 'bi-cash-stack']
-    ];
-    return `<div class="row g-3 mb-3">${cards.map(([l, v, i]) =>
-      `<div class="col-6 col-md-3"><div class="card-x p-3 h-100">
-        <div class="d-flex justify-content-between"><span class="text-muted small">${esc(l)}</span><i class="bi ${i} text-primary"></i></div>
-        <div class="fs-4 fw-bold mt-1">${typeof v === 'number' ? v.toLocaleString() : esc(v)}</div>
-      </div></div>`).join('')}</div>
-      ${tableWrap('Recent rides', '', '<th>ID</th><th>Rider</th><th>Driver</th><th>Type</th><th>Fare</th><th>Status</th><th>Time</th>',
-        D.rides.slice(0, 8).map((r) => `<tr><td>${esc(r.id)}</td><td>${esc(r.rider)}</td><td>${esc(r.driver)}</td><td>${esc(r.type)}</td><td>${money(r.fare)}</td><td>${badge(r.status)}</td><td>${esc(r.time)}</td></tr>`).join(''),
-        'No rides yet')}`;
-  },
-
-  rides() {
-    return toolbar('rideSearch') + tableWrap('All rides',
-      `<button class="btn btn-sm btn-outline-primary" id="btnRefreshRides"><i class="bi bi-arrow-clockwise"></i> Refresh</button>`,
-      '<th>ID</th><th>Rider</th><th>Driver</th><th>Type</th><th>From → To</th><th>Fare</th><th>Status</th><th>Time</th>',
-      D.rides.map((r) => `<tr data-search="${esc((r.id + r.rider + r.driver + r.status).toLowerCase())}">
-        <td><b>${esc(r.id)}</b></td><td>${esc(r.rider)}</td><td>${esc(r.driver)}</td><td>${esc(r.type)}</td>
-        <td class="small">${esc(r.from)} → ${esc(r.to)}</td><td>${money(r.fare)}</td><td>${badge(r.status)}</td><td class="small">${esc(r.time)}</td></tr>`).join(''));
-  },
-
-  drivers() {
-    return toolbar('driverSearch',
-      `<button class="btn btn-sm btn-primary" data-action="add-driver"><i class="bi bi-plus-lg"></i> Add driver</button>
-       <button class="btn btn-sm btn-outline-primary" id="btnRefreshDrivers"><i class="bi bi-arrow-clockwise"></i></button>`)
-      + tableWrap('Drivers', '',
-        '<th>Driver</th><th>Phone</th><th>Vehicle</th><th>Plate</th><th>Rides</th><th>Rating</th><th>Status</th><th>Online</th><th></th>',
-        D.drivers.map((d) => `<tr data-search="${esc((d.name + d.phone + d.status + d.plate).toLowerCase())}">
-          <td>${userCell(d.name, d.code, 'green')}</td><td>${esc(d.phone)}</td><td>${esc(d.type)}</td><td>${esc(d.plate)}</td>
-          <td>${d.rides}</td><td>${d.rating}</td><td>${badge(d.status)}</td>
-          <td>${d.online ? '<span class="text-success">● Online</span>' : '<span class="text-muted">○ Offline</span>'}</td>
-          <td class="text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" data-action="edit-driver" data-id="${d.id}" title="Edit"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-success" data-action="driver-status" data-id="${d.id}" data-status="active" title="Approve/Activate"><i class="bi bi-check-lg"></i></button>
-            <button class="btn btn-sm btn-outline-warning" data-action="driver-status" data-id="${d.id}" data-status="suspended" title="Suspend"><i class="bi bi-pause"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-action="delete-driver" data-id="${d.id}" title="Deactivate"><i class="bi bi-trash"></i></button>
-          </td></tr>`).join(''));
-  },
-
-  riders() {
-    return toolbar('riderSearch',
-      `<button class="btn btn-sm btn-primary" data-action="add-rider"><i class="bi bi-plus-lg"></i> Add rider</button>
-       <button class="btn btn-sm btn-outline-primary" id="btnRefreshRiders"><i class="bi bi-arrow-clockwise"></i></button>`)
-      + tableWrap('Riders', '',
-        '<th>Rider</th><th>Phone</th><th>Email</th><th>Area</th><th>Rides</th><th>Wallet</th><th>Status</th><th></th>',
-        D.riders.map((r) => `<tr data-search="${esc((r.name + r.phone + r.status).toLowerCase())}">
-          <td>${userCell(r.name, r.email, 'blue')}</td><td>${esc(r.phone)}</td><td>${esc(r.email)}</td>
-          <td>${esc(r.island)} / ${esc(r.area)}</td><td>${r.rides}</td><td>${money(r.wallet)}</td><td>${badge(r.status)}</td>
-          <td class="text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" data-action="edit-rider" data-id="${r.id}"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-warning" data-action="rider-status" data-id="${r.id}" data-status="${r.status === 'suspended' ? 'active' : 'suspended'}" title="Toggle restrict">
-              <i class="bi bi-slash-circle"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-action="delete-rider" data-id="${r.id}"><i class="bi bi-trash"></i></button>
-          </td></tr>`).join(''));
-  },
-
-  admins() {
-    return toolbar('adminSearch',
-      `<button class="btn btn-sm btn-primary" data-action="add-admin"><i class="bi bi-plus-lg"></i> Add sub-admin</button>
-       <button class="btn btn-sm btn-outline-primary" id="btnRefreshAdmins"><i class="bi bi-arrow-clockwise"></i></button>`)
-      + tableWrap('Administrators', '',
-        '<th>Name</th><th>Email</th><th>Phone</th><th>Status</th><th>Created</th><th>Last login</th><th></th>',
-        D.admins.map((a) => `<tr data-search="${esc((a.name + a.email + a.status).toLowerCase())}">
-          <td>${userCell(a.name, 'Admin', 'purple')}</td><td>${esc(a.email)}</td><td>${esc(a.phone)}</td>
-          <td>${badge(a.status)}</td><td class="small">${esc(a.created)}</td><td class="small">${esc(a.lastLogin)}</td>
-          <td class="text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" data-action="edit-admin" data-id="${a.id}"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-action="delete-admin" data-id="${a.id}"><i class="bi bi-trash"></i></button>
-          </td></tr>`).join(''));
-  },
-
-  parcels() {
-    return toolbar('parcelSearch') + tableWrap('Parcels', '',
-      '<th>Code</th><th>Rider</th><th>Driver</th><th>Pickup → Drop</th><th>Weight</th><th>Status</th><th>Time</th>',
-      D.parcels.map((p) => `<tr data-search="${esc((p.id + p.rider + p.status).toLowerCase())}">
-        <td><b>${esc(p.id)}</b></td><td>${esc(p.rider)}</td><td>${esc(p.driver)}</td>
-        <td class="small">${esc(p.pickup)} → ${esc(p.drop)}</td><td>${esc(p.weight)}</td><td>${badge(p.status)}</td><td class="small">${esc(p.time)}</td></tr>`).join(''));
-  },
-
-  tours() {
-    return toolbar('tourSearch',
-      `<button class="btn btn-sm btn-primary" data-action="add-tour"><i class="bi bi-plus-lg"></i> Add package</button>`)
-      + tableWrap('Tour packages', '',
-        '<th>Name</th><th>Description</th><th>Price</th><th>Duration</th><th>Max</th><th>Status</th><th></th>',
-        D.tours.map((t) => `<tr data-search="${esc((t.name + t.status).toLowerCase())}">
-          <td><b>${esc(t.name)}</b></td><td class="small">${esc(t.description).slice(0, 80)}</td>
-          <td>${money(t.price)}</td><td>${esc(t.duration)} h</td><td>${esc(t.max)}</td><td>${badge(t.status)}</td>
-          <td class="text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" data-action="edit-tour" data-id="${t.id}"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-action="delete-tour" data-id="${t.id}"><i class="bi bi-trash"></i></button>
-          </td></tr>`).join(''));
-  },
-
-  finance() {
-    return `<div class="row g-3 mb-3">
-      <div class="col-md-6">${tableWrap('Recent payments', '',
-        '<th>ID</th><th>User</th><th>Amount</th><th>Provider</th><th>Status</th><th></th>',
-        (D.payments || []).slice(0, 20).map((p) => `<tr>
-          <td>${p.id}</td><td>${esc(p.userName || p.user_id)}</td><td>${money(p.amount)}</td>
-          <td>${esc(p.provider)}</td><td>${badge(p.status)}</td>
-          <td>${p.status === 'pending' ? `<button class="btn btn-sm btn-success" data-action="complete-payment" data-id="${p.id}">Complete</button>` : ''}</td>
-        </tr>`).join(''))}</div>
-      <div class="col-md-6">${tableWrap('Commission ledger', '',
-        '<th>Driver</th><th>Gross</th><th>Commission</th><th>Driver share</th><th>Date</th>',
-        (D.commissions || []).slice(0, 20).map((c) => `<tr>
-          <td>${esc(c.driverName)}</td><td>${money(c.grossAmount)}</td><td>${money(c.commissionAmount)}</td>
-          <td>${money(c.driverAmount)}</td><td class="small">${c.createdAt ? new Date(c.createdAt).toLocaleString() : '—'}</td>
-        </tr>`).join(''))}</div>
-    </div>
-    <div class="row g-3 mb-3"><div class="col-12">${tableWrap('Driver commission owed', '',
-        '<th>Driver</th><th>Gross since settlement</th><th>Commission owed</th><th>Status</th><th></th>',
-        (D.finance || []).map((d) => `<tr>
-          <td>${esc(d.driverName || d.driver_id)}</td><td>${money(d.gross_since_settlement)}</td><td>${money(d.commission_owed)}</td>
-          <td>${Number(d.commission_owed) > 0 ? badge('pending') : badge('paid')}</td>
-          <td>${Number(d.commission_owed) > 0 ? `<button class="btn btn-sm btn-outline-success" data-action="settle-driver" data-id="${d.driver_id}" title="Record a cash/bank commission payment received outside the app">Record payment</button>` : ''}</td>
-        </tr>`).join(''))}</div></div>`;
-  },
-
-  withdrawals() {
-    return toolbar('payoutSearch') + tableWrap('Payout requests', '',
-      '<th>ID</th><th>Driver</th><th>Method</th><th>Amount</th><th>Requested</th><th>Status</th><th></th>',
-      D.payouts.map((p) => `<tr data-search="${esc((p.driver + p.status).toLowerCase())}">
-        <td>${p.id}</td><td>${esc(p.driver)}</td><td>${esc(p.method)}</td><td>${money(p.amount)}</td>
-        <td class="small">${esc(p.requested)}</td><td>${badge(p.status)}</td>
-        <td class="text-nowrap">${p.status === 'pending' ? `
-          <button class="btn btn-sm btn-success" data-action="payout-status" data-id="${p.id}" data-status="approved">Approve</button>
-          <button class="btn btn-sm btn-danger" data-action="payout-status" data-id="${p.id}" data-status="rejected">Reject</button>
-        ` : p.status === 'approved' ? `
-          <button class="btn btn-sm btn-primary" data-action="payout-status" data-id="${p.id}" data-status="paid">Mark paid</button>
-        ` : ''}</td></tr>`).join(''));
-  },
-
-  promotions() {
-    return toolbar('promoSearch',
-      `<button class="btn btn-sm btn-primary" data-action="add-promo"><i class="bi bi-plus-lg"></i> Create promo</button>`)
-      + tableWrap('Promotions', '',
-        '<th>Code</th><th>Description</th><th>Discount</th><th>Applies</th><th>Usage</th><th>Status</th><th></th>',
-        D.promos.map((p) => `<tr data-search="${esc((p.code + p.status).toLowerCase())}">
-          <td><b>${esc(p.code)}</b></td><td>${esc(p.description)}</td><td>${esc(p.discount)}</td>
-          <td>${esc(p.service)}</td><td>${esc(p.usage)}</td><td>${badge(p.status)}</td>
-          <td class="text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" data-action="edit-promo" data-id="${p.id}"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-outline-danger" data-action="delete-promo" data-id="${p.id}"><i class="bi bi-trash"></i></button>
-          </td></tr>`).join(''));
-  },
-
-  notifications() {
-    return toolbar('notifSearch',
-      `<button class="btn btn-sm btn-primary" data-action="send-notification"><i class="bi bi-plus-lg"></i> Send</button>`)
-      + tableWrap('Notifications', '',
-        '<th>User</th><th>Title</th><th>Body</th><th>Type</th><th>Time</th>',
-        (D.notifications || []).map((n) => `<tr data-search="${esc((n.userName+' '+n.user_id+' '+n.title+' '+n.body+' '+n.type).toLowerCase())}">
-          <td>${esc(n.userName || n.user_id)}</td><td>${esc(n.title)}</td>
-          <td class="small">${esc(n.body)}</td><td>${esc(n.type)}</td>
-          <td class="small">${n.created_at ? new Date(n.created_at).toLocaleString() : '—'}</td>
-        </tr>`).join(''));
-  },
-
-  chat() {
-    return tableWrap('Conversations', '',
-      '<th>ID</th><th>Type</th><th>Messages</th><th>Updated</th>',
-      (D.conversations || []).map((c) => `<tr data-search="${esc((c.id+' '+c.type+' '+c.context_type).toLowerCase())}">
-        <td>${c.id}</td><td>${esc(c.type || c.context_type || '—')}</td>
-        <td>${c.messageCount || 0}</td>
-        <td class="small">${c.updated_at ? new Date(c.updated_at).toLocaleString() : '—'}</td>
-      </tr>`).join(''));
-  },
-
-  audit() {
-    return toolbar('auditSearch') + tableWrap('Audit log', '',
-      '<th>Time</th><th>Admin</th><th>Action</th><th>Entity</th><th>ID</th>',
-      (D.audit || []).map((a) => `<tr data-search="${esc((a.action + a.adminName + a.entity_type).toLowerCase())}">
-        <td class="small">${a.created_at ? new Date(a.created_at).toLocaleString() : '—'}</td>
-        <td>${esc(a.adminName || a.admin_id)}</td><td>${esc(a.action)}</td>
-        <td>${esc(a.entity_type)}</td><td>${a.entity_id || '—'}</td>
-      </tr>`).join(''));
-  },
-
-  pricing() {
-    const cs = D.commissionSettings || {};
-    return `<div class="card-x p-4" style="max-width:520px">
-      <h6 class="mb-3">Commission & settlement</h6>
-      <form id="commissionForm">
-        <div class="mb-3"><label class="form-label">Settlement cycle limit (TZS)</label>
-          <input class="form-control" name="cycleLimit" type="number" value="${esc(cs.cycleLimit || 60000)}" required min="1"></div>
-        <div class="mb-3"><label class="form-label">ZenjiGO commission (%)</label>
-          <input class="form-control" name="percent" type="number" value="${esc(cs.percent || 20)}" required min="0" max="100" step="0.1"></div>
-        <button class="btn btn-primary" type="submit">Save settings</button>
-      </form>
-    </div>`;
-  },
-
-  settings() {
-    return `<div class="card-x p-4">
-      <h6>Platform settings</h6>
-      <p class="text-muted small">Stored in MySQL <code>app_settings</code>. Values below are live from the API.</p>
-      <pre class="settings-json-preview p-3 rounded small" style="max-height:400px;overflow:auto">${esc(JSON.stringify(D.settings || {}, null, 2))}</pre>
-      <div class="mt-3">
-        <label class="form-label">API base URL (saved in browser)</label>
-        <div class="input-group" style="max-width:480px">
-          <input class="form-control" id="apiBaseInput" value="${esc(API.base)}">
-          <button class="btn btn-outline-primary" id="saveApiBase">Save</button>
-        </div>
-      </div>
-    </div>`;
-  }
-};
-
-/* ---------- Event binding ---------- */
-function bindPageEvents() {
-  // Table filter
-  $$('.toolbar input[id$="Search"]').forEach((inp) => {
-    inp.oninput = () => {
-      const q = inp.value.toLowerCase().trim();
-      $$('#content tbody tr').forEach((tr) => {
-        const hay = (tr.getAttribute('data-search') || tr.textContent).toLowerCase();
-        tr.classList.toggle('d-none', q && !hay.includes(q));
+  function loginStep(note) {
+    const email = (Z._loginEmail || '');
+    setHtml($('#authCard'), html`<span class="eyebrow">${ico('lock')} Administrator sign-in</span><h2>Welcome back</h2><p class="sub">Sign in with your admin email and password. We’ll then email you a verification code.</p>
+      ${note ? html`<div class="banner warn" style="margin-bottom:16px">${ico('info')}<div>${note}</div></div>` : ''}
+      <form id="loginForm" novalidate><div class="form-error" data-form-error role="alert">${ico('alert')}<span></span></div>
+        <div class="field" data-field="email"><label for="lgEmail">Email address</label><input id="lgEmail" name="email" type="email" class="input" autocomplete="username" value="${email}" placeholder="you@zenjigo.com" required><div class="err"></div></div>
+        <div class="field" data-field="password" style="margin-top:16px"><label for="lgPass">Password</label><div class="input-wrap"><input id="lgPass" name="password" type="password" class="input" style="padding-right:44px" autocomplete="current-password" required><button type="button" class="iconbtn suf" data-toggle-pass aria-label="Show password" tabindex="-1">${ico('eye')}</button></div><div class="err"></div></div>
+        <label class="row" style="margin:16px 0 22px;gap:10px;font-size:13.5px"><input type="checkbox" id="lgRemember" style="width:16px;height:16px;accent-color:var(--brand)"> Keep me signed in on this device</label>
+        <button class="btn btn-primary btn-lg btn-block" id="lgBtn" type="submit"><span class="spin"></span>Continue</button></form>
+      <div class="secure-note">${ico('shieldCheck')}<span>Only authorised ZenjiGO staff may use this console. Never share your password or verification codes.</span></div>`);
+    const form = $('#loginForm'); $('#lgEmail').focus();
+    form.addEventListener('click', (e) => { const t = e.target.closest('[data-toggle-pass]'); if (!t) return; const i = t.parentElement.querySelector('input'); const s = i.type === 'password'; i.type = s ? 'text' : 'password'; setHtml(t, ico(s ? 'eyeOff' : 'eye')); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault(); const em = $('#lgEmail').value.trim().toLowerCase(), pw = $('#lgPass').value; const bar = $('[data-form-error]', form);
+      $$('.field', form).forEach((f) => f.classList.remove('invalid')); bar.classList.remove('show');
+      let bad = false;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(em)) { fieldErr('email', 'Enter a valid email address.'); bad = true; }
+      if (pw.length < 8) { fieldErr('password', 'Password must be at least 8 characters.'); bad = true; }
+      if (bad) return;
+      await Z.busy($('#lgBtn'), async () => {
+        try { const r = await Z.api.login(em, pw); Z._loginEmail = em; Z._pw = pw; Z._remember = $('#lgRemember').checked; otpStep(r && r.maskedEmail ? r.maskedEmail : em); }
+        catch (err) { $('span', bar).textContent = err.message; bar.classList.add('show'); }
       });
-    };
-  });
-
-  $('#btnRefreshLive')?.addEventListener('click', async (e) => { const state = loadBtn(e.currentTarget); try { await syncAll(); renderPage('live'); } finally { state.done(); } });
-  $('#btnRefreshRides')?.addEventListener('click', async () => { await syncAll(); renderPage('rides'); toast('Rides refreshed'); });
-  $('#btnRefreshDrivers')?.addEventListener('click', async () => { await syncAll(); renderPage('drivers'); toast('Drivers refreshed'); });
-  $('#btnRefreshRiders')?.addEventListener('click', async () => { await syncAll(); renderPage('riders'); toast('Riders refreshed'); });
-  $('#btnRefreshAdmins')?.addEventListener('click', async () => { await syncAll(); renderPage('admins'); toast('Admins refreshed'); });
-
-  $('#commissionForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      await API.patch('/admin/commission-settings', {
-        cycleLimit: Number(fd.get('cycleLimit')),
-        percent: Number(fd.get('percent'))
-      });
-      toast('Commission settings saved');
-      await syncAll();
-      renderPage('pricing');
-    } catch (err) { toast(err.message, 'danger'); }
-  });
-
-  $('#saveApiBase')?.addEventListener('click', () => {
-    const v = $('#apiBaseInput')?.value?.trim();
-    if (v) { localStorage.setItem('zenjigo-api-url', v); toast('API base saved. Reload the page.'); }
-  });
-}
-
-/* ---------- Init ---------- */
-function initAuthUI() {
-  makeOtp($('#loginOtpInputs'));
-  makeOtp($('#forgotOtpInputs'));
-
-  $$('[data-auth]').forEach((b) => b.onclick = () => showAuth(b.dataset.auth));
-
-  const toggle = $('.password-toggle');
-  if (toggle) {
-    toggle.onclick = () => {
-      const i = $('#loginPassword');
-      if (!i) return;
-      i.type = i.type === 'password' ? 'text' : 'password';
-      const icon = toggle.querySelector('i');
-      if (icon) icon.className = 'bi ' + (i.type === 'password' ? 'bi-eye' : 'bi-eye-slash');
-    };
-  }
-
-  $('#loginForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const btn = loadBtn(e.submitter);
-    try {
-      const email = $('#loginEmail').value.trim();
-      const password = $('#loginPassword').value;
-      const d = await API.login(email, password);
-      localStorage.setItem('zenjigo-admin-email', email);
-      // Backend may return tokens directly or require OTP
-      if (d.accessToken) {
-        API.saveSession(d);
-        await enterApp();
-        toast('Signed in successfully');
-      } else {
-        $('#otpEmailLabel') && ($('#otpEmailLabel').textContent = d.maskedEmail || email);
-        showAuth('otp');
-        $('#loginOtpInputs input')?.focus();
-        toast('Security OTP sent');
-      }
-    } catch (err) {
-      toast(err.message, 'danger');
-    } finally { btn.done(); }
-  });
-
-  $('#otpForm')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const inputs = $$('#loginOtpInputs input');
-    if (inputs.some((i) => !i.value)) { toast('Enter the complete 6-digit OTP', 'danger'); return; }
-    const btn = loadBtn(e.submitter);
-    try {
-      const code = inputs.map((i) => i.value).join('');
-      const email = localStorage.getItem('zenjigo-admin-email') || $('#loginEmail')?.value;
-      await API.verifyOtp(email, code);
-      await enterApp();
-      toast('Signed in successfully');
-    } catch (err) {
-      toast(err.message, 'danger');
-    } finally { btn.done(); }
-  });
-
-  $('#logoutBtn')?.addEventListener('click', signOut);
-  $('#logoutDropdown')?.addEventListener('click', signOut);
-
-  $$('.nav-link[data-page]').forEach((a) => {
-    a.addEventListener('click', (e) => {
-      e.preventDefault();
-      renderPage(a.dataset.page);
-      $('#adminApp')?.classList.remove('sidebar-open');
     });
-  });
-  $$('[data-page-jump]').forEach((b) => {
-    b.addEventListener('click', () => renderPage(b.dataset.pageJump));
-  });
-
-  $('#openSidebar')?.addEventListener('click', () => $('#adminApp')?.classList.add('sidebar-open'));
-  $('#sidebarBackdrop')?.addEventListener('click', () => $('#adminApp')?.classList.remove('sidebar-open'));
-
-  const applyTheme = (theme) => { document.documentElement.dataset.theme = theme; document.documentElement.setAttribute('data-bs-theme', theme); localStorage.setItem('zenjigo-theme', theme); const icon = $('#themeBtn i'); if (icon) icon.className = 'bi ' + (theme === 'dark' ? 'bi-sun' : 'bi-moon-stars'); };
-  applyTheme(localStorage.getItem('zenjigo-theme') || 'light');
-  $('#themeBtn')?.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
-  $('#globalSearch')?.addEventListener('input', (e) => { const q = e.target.value.toLowerCase().trim(); $$('#content tbody tr').forEach(tr => { const hay = (tr.getAttribute('data-search') || tr.textContent).toLowerCase(); tr.classList.toggle('d-none', Boolean(q) && !hay.includes(q)); }); });
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  initAuthUI();
-  // Ensure Admins nav item exists
-  const nav = document.querySelector('.sidebar nav, aside nav, .sidebar-nav');
-  if (nav && !nav.querySelector('[data-page="admins"]')) {
-    const settingsLink = nav.querySelector('[data-page="settings"]');
-    const a = document.createElement('a');
-    a.className = 'nav-link';
-    a.dataset.page = 'admins';
-    a.innerHTML = '<i class="bi bi-shield-lock"></i><span>Admins</span>';
-    if (settingsLink) settingsLink.parentNode.insertBefore(a, settingsLink);
-    else nav.appendChild(a);
-    a.addEventListener('click', (e) => { e.preventDefault(); renderPage('admins'); });
+    function fieldErr(n, m) { const w = $(`[data-field="${n}"]`, form); w.classList.add('invalid'); $('.err', w).textContent = m; }
+  }
+  function otpStep(masked) {
+    const LEN = 6; let expiresAt = Date.now() + 10 * 60 * 1000; let resendAt = Date.now() + 30 * 1000; let timer;
+    setHtml($('#authCard'), html`<button class="back" id="otpBack">${ico('chevL')} Back to sign in</button><span class="eyebrow">${ico('mail')} Two-step verification</span><h2>Check your email</h2><p class="sub">Enter the 6-digit code we sent to <b>${masked}</b>.</p>
+      <form id="otpForm" novalidate><div class="form-error" data-form-error role="alert">${ico('alert')}<span></span></div>
+        <div class="otp" id="otpRow" role="group" aria-label="Verification code">${Array.from({ length: LEN }, (_, i) => html`<input inputmode="numeric" autocomplete="${i === 0 ? 'one-time-code' : 'off'}" maxlength="1" aria-label="Digit ${i + 1}">`)}</div>
+        <div class="row between" style="margin:14px 0 22px;font-size:13px"><span class="muted" id="otpTimer"></span><button type="button" class="link" id="otpResend" disabled>Resend code</button></div>
+        <button class="btn btn-primary btn-lg btn-block" id="otpBtn" type="submit"><span class="spin"></span>Verify and sign in</button></form>`);
+    const inputs = $$('#otpRow input'); const form = $('#otpForm'); const bar = $('[data-form-error]', form);
+    inputs[0].focus();
+    const code = () => inputs.map((i) => i.value).join('');
+    inputs.forEach((inp, idx) => {
+      inp.addEventListener('input', () => { inp.value = inp.value.replace(/\D/g, '').slice(-1); if (inp.value && idx < LEN - 1) inputs[idx + 1].focus(); $('#otpRow').classList.remove('bad'); if (code().length === LEN) form.requestSubmit(); });
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Backspace' && !inp.value && idx > 0) inputs[idx - 1].focus(); if (e.key === 'ArrowLeft' && idx > 0) inputs[idx - 1].focus(); if (e.key === 'ArrowRight' && idx < LEN - 1) inputs[idx + 1].focus(); });
+      inp.addEventListener('paste', (e) => { const t = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, LEN); if (!t) return; e.preventDefault(); [...t].forEach((c, k) => (inputs[k].value = c)); inputs[Math.min(t.length, LEN - 1)].focus(); if (t.length === LEN) form.requestSubmit(); });
+    });
+    const tick = () => {
+      const left = Math.max(0, Math.round((expiresAt - Date.now()) / 1000)); const rs = Math.max(0, Math.round((resendAt - Date.now()) / 1000));
+      const t = $('#otpTimer'); if (!t) return clearInterval(timer);
+      t.textContent = left ? `Code expires in ${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}` : 'Code expired — request a new one';
+      const r = $('#otpResend'); r.disabled = rs > 0; r.textContent = rs > 0 ? `Resend in ${rs}s` : 'Resend code';
+    };
+    timer = setInterval(tick, 1000); tick();
+    $('#otpBack').addEventListener('click', () => { clearInterval(timer); Z._pw = ''; loginStep(); });
+    $('#otpResend').addEventListener('click', async () => {
+      const b = $('#otpResend'); b.disabled = true;
+      try { await Z.api.login(Z._loginEmail, Z._pw || ''); expiresAt = Date.now() + 10 * 60 * 1000; resendAt = Date.now() + 30 * 1000; bar.classList.remove('show'); Z.toast('A new code is on its way.'); inputs.forEach((i) => (i.value = '')); inputs[0].focus(); }
+      catch (err) { $('span', bar).textContent = err.message; bar.classList.add('show'); resendAt = Date.now() + 15 * 1000; }
+      tick();
+    });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault(); bar.classList.remove('show');
+      if (code().length < LEN) { $('span', bar).textContent = 'Enter all 6 digits of your code.'; bar.classList.add('show'); return; }
+      await Z.busy($('#otpBtn'), async () => {
+        try { await Z.api.verifyOtp(Z._loginEmail, code(), Z._remember); clearInterval(timer); Z._loginEmail = ''; Z._pw = ''; await start(); }
+        catch (err) { $('#otpRow').classList.add('bad'); $('span', bar).textContent = err.message; bar.classList.add('show'); inputs.forEach((i) => (i.value = '')); inputs[0].focus(); }
+      });
+    });
   }
 
-  if (API.session()?.accessToken) {
-    enterApp().catch(() => { API.clearSession(); showAuth('login'); });
-  } else {
-    showAuth('login');
+  /* ---------------- Shell ---------------- */
+  function renderShell() {
+    setHtml(root, html`<div class="app"><aside class="sidebar" id="sidebar" aria-label="Main navigation"><div class="sb-head"><div class="sb-brand"><img src="assets/img/zenjigo-icon.png" alt=""><div>ZenjiGO<small>Admin console</small></div></div></div>
+      <nav class="sb-nav" id="nav">${NAV.map((g) => html`<div class="sb-group">${g.group}</div>${g.items.map((n) => html`<a class="sb-link" href="#/${n.k}" data-nav="${n.k}">${ico(n.i)}<span>${n.l}</span><span class="count hidden ${n.tone || ''}" data-count="${n.k}"></span></a>`)}`)}</nav>
+      <div class="sb-foot"><div class="sb-user">${Z.avatar(Z.me.fullName, null, '', Z.me.id)}<div style="min-width:0"><b>${Z.me.fullName}</b><span>${Z.me.email}</span></div></div>
+        <button class="sb-link" data-act="logout">${ico('logout')}<span>Sign out</span></button></div></aside>
+      <div class="scrim" id="scrim"></div>
+      <div class="main"><header class="topbar"><button class="iconbtn menu-toggle" id="menuBtn" aria-label="Open menu">${ico('menu')}</button>
+        <div class="tb-title"><h1 id="pgTitle"></h1><small id="pgSub"></small></div><div class="tb-spacer"></div>
+        <button class="searchbtn" data-act="palette" aria-label="Search">${ico('search')}<span>Search drivers, riders, pages…</span><kbd>Ctrl K</kbd></button>
+        <button class="iconbtn" id="themeBtn" data-act="theme" aria-label="Toggle theme"></button>
+        <a class="iconbtn" href="#/support" aria-label="Support inbox">${ico('chat')}<span class="pip hidden" id="supPip"></span></a></header>
+        <main class="content" id="page" tabindex="-1"></main></div></div>`);
+    theme.set(theme.get());
+    $('#menuBtn').addEventListener('click', () => toggleMenu(true)); $('#scrim').addEventListener('click', () => toggleMenu(false));
+    $('#nav').addEventListener('click', (e) => { if (e.target.closest('a')) toggleMenu(false); });
   }
-});
+  const toggleMenu = (o) => { $('#sidebar').classList.toggle('open', o); $('#scrim').classList.toggle('show', o); };
+
+  async function refreshQueues() {
+    try {
+      const d = await Z.api.get('/admin/dashboard', { ttl: 15000 }); Z.queues = { ...d.queues, activeRides: d.activeRides }; Z.dash = d;
+      ALL.forEach((n) => { if (!n.q) return; const c = $(`[data-count="${n.k}"]`); if (!c) return; const v = Number(n.q(Z.queues) || 0); c.textContent = v > 99 ? '99+' : v; c.classList.toggle('hidden', !v); });
+      const p = $('#supPip'); if (p) { const u = Z.queues.supportUnread || 0; p.textContent = u > 9 ? '9+' : u; p.classList.toggle('hidden', !u); }
+    } catch (_) {}
+  }
+  Z.refreshQueues = refreshQueues;
+
+  /* ---------------- Router ---------------- */
+  let leave = null; let token = 0; let current = '';
+  function parse() { const h = location.hash.replace(/^#\/?/, ''); const [path] = h.split('?'); const parts = path.split('/').filter(Boolean); return { key: parts[0] || 'dashboard', args: parts.slice(1) }; }
+  async function route() {
+    if (!Z.me) return;
+    const { key, args } = parse(); const page = Z.pages[key];
+    if (leave) { try { leave(); } catch (_) {} leave = null; }
+    const my = ++token; current = key;
+    $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === key));
+    const el = $('#page'); const nav = ALL.find((n) => n.k === key);
+    if (!page) { setHead('Page not found', ''); setHtml(el, Z.empty('Page not found', 'That address does not exist.', 'search', html`<a class="btn btn-primary" style="margin-top:14px" href="#/dashboard">Go to dashboard</a>`)); return; }
+    setHead(page.title || nav.l, page.subtitle || ''); setHtml(el, html`<div class="card">${Z.skeleton(7)}</div>`);
+    const ctx = { el, args, alive: () => my === token, onLeave: (fn) => { leave = fn; }, setHead, reload: () => route() };
+    try { await page.render(ctx); } catch (err) { if (my === token) { console.error(err); setHtml(el, html`<div class="card">${Z.errorBlock(err)}</div>`); } }
+    if (my === token) { el.focus({ preventScroll: true }); window.scrollTo(0, 0); }
+  }
+  function setHead(t, s) { $('#pgTitle').textContent = t; $('#pgSub').textContent = s || ''; document.title = `${t} · ZenjiGO Admin`; }
+  Z.setHead = setHead;
+  Z.go = (h) => { location.hash = h; };
+  Z.reloadPage = () => { Z.api.clearCache(); route(); };
+  Z.act('reload', () => Z.reloadPage());
+  Z.act('theme', () => theme.set(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+  Z.act('logout', async () => {
+    const ok = await Z.confirm({ title: 'Sign out?', message: 'You will need your password and a new email code to sign back in.', confirmLabel: 'Sign out' }); if (!ok) return;
+    await Z.api.logout(); Z.me = null; Z.closeAll(); history.replaceState(null, '', location.pathname); renderAuth();
+  });
+  window.addEventListener('hashchange', route);
+  window.addEventListener('zg:logout', () => { if (!Z.me) return; Z.me = null; Z.closeAll(); renderAuth('Your session has expired. Please sign in again.'); });
+
+  /* ---------------- Command palette ---------------- */
+  let dirCache = null;
+  async function directory() {
+    if (dirCache && Date.now() - dirCache.t < 60000) return dirCache.d;
+    const [d, r] = await Promise.all([Z.api.get('/admin/drivers', { ttl: 60000 }).catch(() => []), Z.api.get('/admin/riders', { ttl: 60000 }).catch(() => [])]);
+    dirCache = { t: Date.now(), d: [...d.map((x) => ({ t: 'drivers', id: x.id, name: x.fullName, sub: `${x.phone} · ${x.plateNumber || x.driverCode || ''}` })), ...r.map((x) => ({ t: 'riders', id: x.id, name: x.fullName, sub: `${x.phone} ${x.email || ''}` }))] };
+    return dirCache.d;
+  }
+  Z.act('palette', async () => {
+    const m = Z.modal({ title: '', size: 'palette', dismissible: true, body: html`<input id="palQ" placeholder="Jump to a page, driver or rider…" aria-label="Search" autocomplete="off"><div class="pal-list" id="palList"></div>` });
+    $('.m-head', m.el).remove(); $('[data-body]', m.el).style.padding = '0'; m.el.classList.add('palette'); m.el.classList.remove('size');
+    const q = $('#palQ'); q.focus(); let sel = 0; let items = []; let dir = [];
+    directory().then((d) => { dir = d; draw(); });
+    function draw() {
+      const s = q.value.trim().toLowerCase();
+      const pages = ALL.filter((n) => !s || n.l.toLowerCase().includes(s)).map((n) => ({ h: `#/${n.k}`, name: n.l, sub: 'Page', i: n.i }));
+      const people = s.length >= 2 ? dir.filter((p) => (p.name + ' ' + p.sub).toLowerCase().includes(s)).slice(0, 8).map((p) => ({ h: `#/${p.t}/${p.id}`, name: p.name, sub: `${F.title(p.t.slice(0, -1))} · ${p.sub}`, i: p.t === 'drivers' ? 'id' : 'user' })) : [];
+      items = [...pages, ...people]; sel = Math.min(sel, Math.max(0, items.length - 1));
+      setHtml($('#palList'), items.length ? html`${pages.length ? html`<div class="pal-sec">Pages</div>` : ''}${items.map((it, n) => html`${n === pages.length && people.length ? html`<div class="pal-sec">People</div>` : ''}<button class="pal-item ${n === sel ? 'sel' : ''}" data-n="${n}">${ico(it.i)}<span><b style="font-weight:600">${it.name}</b></span><small>${it.sub}</small></button>`)}` : html`<div class="empty" style="padding:30px">No results</div>`);
+    }
+    const go = (n) => { const it = items[n]; if (it) { m.close(); location.hash = it.h; } };
+    q.addEventListener('input', () => { sel = 0; draw(); });
+    q.addEventListener('keydown', (e) => { if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, items.length - 1); draw(); e.preventDefault(); } if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); draw(); e.preventDefault(); } if (e.key === 'Enter') go(sel); });
+    $('#palList').addEventListener('click', (e) => { const b = e.target.closest('[data-n]'); if (b) go(+b.dataset.n); });
+    draw();
+  });
+  document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && Z.me) { e.preventDefault(); Z.acts.palette(); } });
+
+  /* ---------------- Boot ---------------- */
+  let poll;
+  async function start() {
+    Z.api.clearCache();
+    try { Z.me = await Z.api.request('/admin/me'); } catch (err) { Z.me = null; Z.api.store.clear(); renderAuth(err.status === 401 || err.status === 403 ? '' : err.message); return; }
+    renderShell(); await refreshQueues(); clearInterval(poll); poll = setInterval(() => { if (!document.hidden) refreshQueues(); }, 60000);
+    if (!location.hash || location.hash === '#') location.hash = '#/dashboard'; else route();
+  }
+  window.addEventListener('DOMContentLoaded', async () => {
+    const boot = $('#boot');
+    if (!Z.api.base()) { boot && boot.remove(); renderAuth('This console is not connected to an API yet. Set apiBase in assets/js/config.js.'); return; }
+    if (Z.api.store.get()) await start(); else renderAuth();
+    boot && boot.remove();
+  });
 })();

@@ -1,57 +1,16 @@
-# ZenjiGO Super Admin Web Frontend
+# ZenjiGO Admin Console
 
-Fully API-integrated Super Admin frontend for the ZenjiGO platform.
+Professional operations console for ZenjiGO. Plain HTML/CSS/JS — no build step, no mock data, no third-party scripts (Leaflet loads only on the Live operations page).
 
-## Features (all backed by live MySQL API)
-
-- Dashboard metrics
-- Rides list
-- Drivers: list, add, edit, approve/activate, suspend, deactivate
-- Riders: list, add, edit, restrict/activate, deactivate
-- Sub-admins: list, add, edit, deactivate
-- Parcels list
-- Tour packages: list, add, edit, deactivate
-- Finance: payments (complete pending), commission ledger
-- Withdrawals / payouts: approve, reject, mark paid
-- Promotions: create, edit, deactivate
-- Notifications: list + send to user
-- Support conversations list
-- Audit log
-- Commission & settlement settings
-- Platform settings view + API base URL config
+## Pages
+Dashboard · Live operations · Rides · Drivers (profile, documents, finance, reviews) · Document review · Driver requests · Riders · Parcels · Tours · Finance · Driver payouts · Promotions · Support inbox · Safety reports · Notifications · Pricing & policy · Admins & access · Audit log · Archive · My account
 
 ## Run
+- **Served by the backend (recommended):** copy this folder to `backend/public/admin`, start the backend, open `https://<api-host>/admin`. No configuration needed.
+- **Hosted separately (GitHub Pages / CNAME):** set `apiBase` in `assets/js/config.js` and add this site's origin to `CORS_ORIGINS` in the backend `.env`.
 
-### Option A — served by the backend (recommended)
+## Sign-in
+Email + password, then a 6-digit code emailed to the admin. Choose "Keep me signed in" to persist the session on a trusted device; otherwise it ends when the tab closes.
 
-```bash
-cd backend
-npm install
-npm run migrate
-npm run seed
-npm run dev
-```
-
-Open: `http://localhost:5000/admin`
-
-### Option B — static server
-
-```bash
-cd frontend
-python -m http.server 8080
-```
-
-Open `http://localhost:8080` and ensure the API is running on port 5000.
-
-## Auth
-
-Admin login uses email + password + OTP (Twilio Verify in production).
-
-Seed credentials come from backend `.env`:
-
-- `SEED_ADMIN_EMAIL`
-- `SEED_ADMIN_PASSWORD`
-
-## Tech
-
-HTML5, CSS3, Vanilla JS, Bootstrap 5, Bootstrap Icons, Chart.js, Leaflet.
+## Requires backend update
+This console uses new admin endpoints (change requests, document queue, settlements, tour bookings, rider detail, account/password). Deploy the updated backend and run `npm run migrate` (migration `010_admin_review_tools.sql`).

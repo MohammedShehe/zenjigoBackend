@@ -3,6 +3,7 @@ const config = require('../config/env');
 const { hashPassword } = require('../utils/hash');
 const ApiError = require('../utils/ApiError');
 const archiveService = require('../services/archive.service');
+const { normalizePhone } = require('../utils/phone');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyUser } = require('../services/notification.service');
@@ -15,20 +16,105 @@ function audit(adminId, action, entityType, entityId, meta = null) {
   ).catch(() => {});
 }
 
+function assertStrongPassword(p) {
+  const v = String(p || '');
+  if (v.length < 10 || !/[a-z]/.test(v) || !/[A-Z]/.test(v) || !/\d/.test(v)) {
+    throw ApiError.badRequest('Password must be at least 10 characters and include upper and lower case letters and a number.');
+  }
+}
+
+async function withDup(promise) {
+  try { return await promise; } catch (e) {
+    if (e && e.code === 'ER_DUP_ENTRY') {
+      const m = /for key '([^']+)'/.exec(e.sqlMessage || '') || [];
+      const what = /plate/.test(m[1] || '') ? 'plate number' : /email/.test(m[1] || '') ? 'email address' : /phone/.test(m[1] || '') ? 'phone number' : 'value';
+      throw ApiError.conflict(`That ${what} is already registered.`);
+    }
+    throw e;
+  }
+}
+
 /* -------------------- Dashboard -------------------- */
 exports.dashboard = asyncHandler(async (req, res) => {
-  const [[users]] = await db.pool.query('SELECT COUNT(*) n FROM users');
-  const [[riders]] = await db.pool.query(`SELECT COUNT(*) n FROM users WHERE role='rider'`);
-  const [[drivers]] = await db.pool.query(`SELECT COUNT(*) n FROM users WHERE role='driver'`);
-  const [[admins]] = await db.pool.query(`SELECT COUNT(*) n FROM users WHERE role='admin'`);
-  const [[ridesToday]] = await db.pool.query(`SELECT COUNT(*) n FROM rides WHERE DATE(created_at)=UTC_DATE()`);
-  const [[pending]] = await db.pool.query(`SELECT COUNT(*) n FROM driver_profiles WHERE application_status IN ('pending','under_review')`);
-  const [[activeRides]] = await db.pool.query(`SELECT COUNT(*) n FROM rides WHERE status IN ('assigned','arriving','arrived','started')`);
-  const [[revenue]] = await db.pool.query(`SELECT COALESCE(SUM(final_fare),0) n FROM rides WHERE status='completed' AND DATE(created_at)=UTC_DATE()`);
+  const one = async (sql, params = []) => { const [[r]] = await db.pool.query(sql, params); return r || {}; };
+  const safe = async (fn, fallback) => { try { return await fn(); } catch (_) { return fallback; } };
+
+  const users = await one('SELECT COUNT(*) n FROM users');
+  const riders = await one(`SELECT COUNT(*) n FROM users WHERE role='rider'`);
+  const drivers = await one(`SELECT COUNT(*) n FROM users WHERE role='driver'`);
+  const admins = await one(`SELECT COUNT(*) n FROM users WHERE role='admin'`);
+  const ridesToday = await one(`SELECT COUNT(*) n FROM rides WHERE DATE(created_at)=UTC_DATE()`);
+  const pending = await one(`SELECT COUNT(*) n FROM driver_profiles WHERE application_status IN ('pending','under_review')`);
+  const activeRides = await one(`SELECT COUNT(*) n FROM rides WHERE status IN ('searching','accepted','arriving','arrived','started')`);
+  const revenue = await one(`SELECT COALESCE(SUM(final_fare),0) n FROM rides WHERE status='completed' AND DATE(created_at)=UTC_DATE()`);
+  const onlineDrivers = await one(`SELECT COUNT(*) n FROM driver_profiles WHERE online=1 AND application_status='active'`);
+  const pendingDocuments = await one(`SELECT COUNT(*) n FROM driver_documents WHERE status='pending' AND url NOT LIKE 'pending-upload://%'`);
+  const pendingPayouts = await one(`SELECT COUNT(*) n, COALESCE(SUM(amount),0) total FROM payout_requests WHERE status='pending'`);
+  const pendingPayments = await one(`SELECT COUNT(*) n FROM payment_transactions WHERE status='pending'`);
+  const pendingParcels = await one(`SELECT COUNT(*) n FROM parcels WHERE status='pending'`);
+  const pendingTours = await safe(() => one(`SELECT COUNT(*) n FROM tour_bookings WHERE status='pending'`), { n: 0 });
+  const pendingChangeRequests = await safe(() => one(`SELECT COUNT(*) n FROM driver_change_requests WHERE status='pending'`), { n: 0 });
+  const openReports = await safe(() => one(`SELECT COUNT(*) n FROM driver_reports WHERE status='open'`), { n: 0 });
+  const blockedDrivers = await safe(() => one(`SELECT COUNT(*) n FROM driver_financials WHERE blocked=1`), { n: 0 });
+  const commissionOwed = await safe(() => one(`SELECT COALESCE(SUM(commission_owed),0) n FROM driver_financials`), { n: 0 });
+  const expiringDocs = await one(`
+    SELECT COUNT(*) n FROM driver_documents dd
+    WHERE dd.expires_at IS NOT NULL AND dd.expires_at <= DATE_ADD(UTC_DATE(), INTERVAL 30 DAY)
+      AND dd.status IN ('approved','pending')
+      AND NOT EXISTS (SELECT 1 FROM driver_documents n2 WHERE n2.driver_id=dd.driver_id AND n2.document_type=dd.document_type AND n2.id>dd.id AND n2.status IN ('approved','pending'))`);
+  const unreadSupport = await safe(async () => {
+    const r = await chatService.adminList(req.user.sub);
+    return r.filter((c) => c.type === 'support').reduce((a, c) => a + Number(c.unreadCount || 0), 0);
+  }, 0);
+  const trend = await db.query(`
+    SELECT DATE_FORMAT(d.day,'%Y-%m-%d') day,
+           COALESCE(x.rides,0) rides, COALESCE(x.completed,0) completed,
+           COALESCE(x.cancelled,0) cancelled, COALESCE(x.revenue,0) revenue
+    FROM (
+      SELECT DATE_SUB(UTC_DATE(), INTERVAL n DAY) day FROM (
+        SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6
+        UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11 UNION SELECT 12 UNION SELECT 13
+      ) t
+    ) d
+    LEFT JOIN (
+      SELECT DATE(created_at) day, COUNT(*) rides,
+             SUM(status='completed') completed, SUM(status='cancelled') cancelled,
+             SUM(CASE WHEN status='completed' THEN COALESCE(final_fare,0) ELSE 0 END) revenue
+      FROM rides WHERE created_at >= DATE_SUB(UTC_DATE(), INTERVAL 13 DAY) GROUP BY DATE(created_at)
+    ) x ON x.day = d.day
+    ORDER BY d.day ASC`);
+  const byStatus = await db.query(`SELECT status, COUNT(*) n FROM rides WHERE created_at >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY) GROUP BY status`);
+  const byType = await db.query(`SELECT ride_type type, COUNT(*) n FROM rides WHERE created_at >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY) GROUP BY ride_type`);
+  const monthRevenue = await one(`SELECT COALESCE(SUM(final_fare),0) n FROM rides WHERE status='completed' AND created_at >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)`);
+  const monthCommission = await safe(() => one(`SELECT COALESCE(SUM(commission_amount),0) n FROM driver_earning_ledger WHERE created_at >= DATE_SUB(UTC_DATE(), INTERVAL 30 DAY)`), { n: 0 });
+
   ok(res, {
     users: users.n, riders: riders.n, drivers: drivers.n, admins: admins.n,
     todayRides: ridesToday.n, pendingDriverApplications: pending.n,
-    activeRides: activeRides.n, todayRevenue: Number(revenue.n)
+    activeRides: activeRides.n, todayRevenue: Number(revenue.n),
+    onlineDrivers: onlineDrivers.n,
+    queues: {
+      driverApplications: pending.n,
+      documents: pendingDocuments.n,
+      changeRequests: pendingChangeRequests.n,
+      payouts: pendingPayouts.n,
+      payoutsAmount: Number(pendingPayouts.total || 0),
+      payments: pendingPayments.n,
+      parcels: pendingParcels.n,
+      tourBookings: pendingTours.n,
+      reports: openReports.n,
+      supportUnread: unreadSupport,
+      expiringDocuments: expiringDocs.n,
+      blockedDrivers: blockedDrivers.n
+    },
+    finance: {
+      revenue30d: Number(monthRevenue.n),
+      commission30d: Number(monthCommission.n),
+      commissionOutstanding: Number(commissionOwed.n)
+    },
+    trend: trend.map((t) => ({ day: t.day, rides: Number(t.rides), completed: Number(t.completed), cancelled: Number(t.cancelled), revenue: Number(t.revenue) })),
+    ridesByStatus: byStatus.map((r) => ({ status: r.status, count: Number(r.n) })),
+    ridesByType: byType.map((r) => ({ type: r.type, count: Number(r.n) }))
   });
 });
 
@@ -37,7 +123,9 @@ exports.riders = asyncHandler(async (req, res) => {
   const rows = await db.query(`
     SELECT u.id, u.full_name fullName, u.phone, u.email, u.status, u.island, u.region, u.district, u.ward,
            u.created_at createdAt, COALESCE(w.balance,0) walletBalance,
-           COALESCE(r.total_rides,0) totalRides, COALESCE(r.rating,0) rating
+           COALESCE(r.total_rides,0) totalRides, COALESCE(r.rating,0) rating,
+           COALESCE(r.cancellation_debt,0) cancellationDebt, r.referral_code referralCode,
+           u.photo_url photoUrl, u.last_login_at lastLoginAt
     FROM users u
     LEFT JOIN wallets w ON w.user_id=u.id
     LEFT JOIN rider_profiles r ON r.user_id=u.id
@@ -49,7 +137,8 @@ exports.riders = asyncHandler(async (req, res) => {
 exports.createRider = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.fullName || !b.phone) throw ApiError.badRequest('fullName and phone are required');
-  const id = await db.transaction(async (conn) => {
+  b.phone = normalizePhone(b.phone);
+  const id = await withDup(db.transaction(async (conn) => {
     const [u] = await conn.query(
       'INSERT INTO users(role,full_name,phone,email,island,region,district,ward,status) VALUES(?,?,?,?,?,?,?,?,?)',
       ['rider', b.fullName, b.phone, b.email || null, b.island || null, b.region || null, b.district || b.area || null, b.ward || null, b.status || 'active']
@@ -57,7 +146,7 @@ exports.createRider = asyncHandler(async (req, res) => {
     await conn.query('INSERT INTO rider_profiles(user_id,referral_code) VALUES(?,?)', [u.insertId, `ZG${String(u.insertId).padStart(6, '0')}`]);
     await conn.query('INSERT INTO wallets(user_id) VALUES(?)', [u.insertId]);
     return u.insertId;
-  });
+  }));
   await audit(req.user.sub, 'create_rider', 'user', id, { fullName: b.fullName, phone: b.phone });
   ok(res, { id }, 'Rider created', 201);
 });
@@ -67,13 +156,14 @@ exports.updateRider = asyncHandler(async (req, res) => {
   const id = req.params.id;
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='rider'`, [id]);
   if (!existing.length) throw ApiError.notFound('Rider not found');
-  await db.query(
+  if (b.phone) b.phone = normalizePhone(b.phone);
+  await withDup(db.query(
     `UPDATE users SET full_name=COALESCE(?,full_name), phone=COALESCE(?,phone), email=COALESCE(?,email),
      island=COALESCE(?,island), region=COALESCE(?,region), district=COALESCE(?,district), ward=COALESCE(?,ward),
      status=COALESCE(?,status) WHERE id=?`,
     [b.fullName || null, b.phone || null, b.email || null, b.island || null, b.region || null,
      b.district || b.area || null, b.ward || null, b.status || null, id]
-  );
+  ));
   await audit(req.user.sub, 'update_rider', 'user', id, b);
   ok(res, null, 'Rider updated');
 });
@@ -108,22 +198,29 @@ exports.drivers = asyncHandler(async (req, res) => {
            (
              SELECT MIN(dd.expires_at) FROM driver_documents dd
              WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
-               AND dd.status IN ('approved','verified','pending')
+               AND dd.status IN ('approved','pending')
+               AND NOT EXISTS (SELECT 1 FROM driver_documents n2 WHERE n2.driver_id=dd.driver_id AND n2.document_type=dd.document_type AND n2.id>dd.id AND n2.status IN ('approved','pending'))
            ) nearestDocExpiry,
            (
              SELECT COUNT(*) FROM driver_documents dd
              WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
                AND dd.expires_at < UTC_DATE()
-               AND dd.status IN ('approved','verified','pending')
+               AND dd.status IN ('approved','pending')
+               AND NOT EXISTS (SELECT 1 FROM driver_documents n2 WHERE n2.driver_id=dd.driver_id AND n2.document_type=dd.document_type AND n2.id>dd.id AND n2.status IN ('approved','pending'))
            ) expiredDocsCount,
            (
              SELECT COUNT(*) FROM driver_documents dd
              WHERE dd.driver_id = u.id AND dd.expires_at IS NOT NULL
                AND dd.expires_at BETWEEN UTC_DATE() AND DATE_ADD(UTC_DATE(), INTERVAL 30 DAY)
-               AND dd.status IN ('approved','verified','pending')
-           ) expiringSoonCount
+               AND dd.status IN ('approved','pending')
+               AND NOT EXISTS (SELECT 1 FROM driver_documents n2 WHERE n2.driver_id=dd.driver_id AND n2.document_type=dd.document_type AND n2.id>dd.id AND n2.status IN ('approved','pending'))
+           ) expiringSoonCount,
+           (SELECT COUNT(*) FROM driver_documents dd WHERE dd.driver_id=u.id AND dd.status='pending' AND dd.url NOT LIKE 'pending-upload://%') pendingDocsCount,
+           COALESCE(f.commission_owed,0) commissionOwed, COALESCE(f.blocked,0) financeBlocked,
+           u.photo_url photoUrl
     FROM users u
     JOIN driver_profiles d ON d.user_id=u.id
+    LEFT JOIN driver_financials f ON f.driver_id=u.id
     LEFT JOIN vehicles v ON v.id = (
       SELECT id FROM vehicles WHERE driver_id = u.id
       ORDER BY (status = 'active') DESC, id DESC LIMIT 1
@@ -135,9 +232,10 @@ exports.drivers = asyncHandler(async (req, res) => {
 
 exports.driver = asyncHandler(async (req, res) => {
   const u = await db.query(`
-    SELECT u.id, u.full_name, u.phone, u.email, u.status, u.photo_url, u.created_at, u.updated_at,
+    SELECT u.id, u.full_name, u.phone, u.email, u.status, u.photo_url, u.created_at, u.updated_at, u.last_login_at,
            d.driver_code, d.national_id, d.home_address, d.application_status, d.rejection_reason,
            d.online, d.approved_at, d.rating, d.total_rides, d.total_earnings,
+           d.current_lat, d.current_lng, d.location_updated_at,
            v.id vehicle_id, v.type vehicleType, v.plate_number plateNumber,
            v.make, v.model, v.color, v.model_year year, v.status vehicleStatus
     FROM users u
@@ -148,18 +246,39 @@ exports.driver = asyncHandler(async (req, res) => {
     )
     WHERE u.id=? AND u.role='driver'`, [req.params.id]);
   if (!u.length) throw ApiError.notFound('Driver not found');
-  const docs = await db.query('SELECT * FROM driver_documents WHERE driver_id=? ORDER BY id DESC', [req.params.id]);
+  const id = req.params.id;
+  const docs = await db.query(
+    `SELECT dd.*, a.full_name verifiedByName FROM driver_documents dd
+     LEFT JOIN users a ON a.id = dd.verified_by
+     WHERE dd.driver_id=? ORDER BY dd.id DESC`, [id]);
   const vehicles = await db.query(
     'SELECT id, type, plate_number plateNumber, make, model, color, model_year year, status FROM vehicles WHERE driver_id=? ORDER BY id DESC',
-    [req.params.id]
+    [id]
   );
-  ok(res, { profile: u[0], documents: docs, vehicles });
+  const safe = async (fn, fb) => { try { return await fn(); } catch (_) { return fb; } };
+  const financials = await safe(async () => (await db.query('SELECT * FROM driver_financials WHERE driver_id=?', [id]))[0] || null, null);
+  const recentRides = await db.query(
+    `SELECT r.id, r.ride_code, r.ride_type, r.status, r.pickup_address, r.destination_address, r.final_fare, r.estimated_fare, r.created_at, ru.full_name riderName
+     FROM rides r JOIN users ru ON ru.id=r.rider_id WHERE r.driver_id=? ORDER BY r.id DESC LIMIT 15`, [id]);
+  const payouts = await db.query('SELECT id, amount, method, status, admin_note, created_at, processed_at FROM payout_requests WHERE driver_id=? ORDER BY id DESC LIMIT 10', [id]);
+  const settlements = await safe(() => db.query('SELECT id, gross_earnings, commission_rate, commission_amount, paid_amount, status, provider, external_reference, created_at, paid_at FROM driver_settlements WHERE driver_id=? ORDER BY id DESC LIMIT 10', [id]), []);
+  const reviews = await safe(() => db.query(
+    `SELECT rt.id, rt.stars, rt.feedback, rt.created_at, fu.full_name riderName FROM ratings rt
+     LEFT JOIN users fu ON fu.id=rt.from_user_id WHERE rt.to_user_id=? ORDER BY rt.id DESC LIMIT 10`, [id]), []);
+  const changeRequests = await safe(() => db.query('SELECT * FROM driver_change_requests WHERE driver_id=? ORDER BY id DESC LIMIT 20', [id]), []);
+  const reports = await safe(() => db.query(
+    `SELECT r.id, r.reason, r.details, r.status, r.created_at, rp.full_name reporterName FROM driver_reports r
+     LEFT JOIN users rp ON rp.id=r.reporter_id WHERE r.driver_id=? ORDER BY r.id DESC LIMIT 10`, [id]), []);
+  const stats = (await db.query(
+    `SELECT COUNT(*) total, SUM(status='completed') completed, SUM(status='cancelled') cancelled FROM rides WHERE driver_id=?`, [id]))[0] || {};
+  ok(res, { profile: u[0], documents: docs, vehicles, financials, recentRides, payouts, settlements, reviews, changeRequests, reports, stats });
 });
 
 exports.createDriver = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.fullName || !b.phone) throw ApiError.badRequest('fullName and phone are required');
-  const id = await db.transaction(async (conn) => {
+  b.phone = normalizePhone(b.phone);
+  const id = await withDup(db.transaction(async (conn) => {
     const userStatus = (b.status === 'active' || b.applicationStatus === 'active') ? 'active' : 'pending';
     const [u] = await conn.query(
       'INSERT INTO users(role,full_name,phone,email,status) VALUES(?,?,?,?,?)',
@@ -220,7 +339,7 @@ exports.createDriver = asyncHandler(async (req, res) => {
     }
 
     return u.insertId;
-  });
+  }));
   await audit(req.user.sub, 'create_driver', 'user', id, { fullName: b.fullName, phone: b.phone });
   ok(res, { id }, 'Driver created', 201);
 });
@@ -230,7 +349,8 @@ exports.updateDriver = asyncHandler(async (req, res) => {
   const id = req.params.id;
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='driver'`, [id]);
   if (!existing.length) throw ApiError.notFound('Driver not found');
-  await db.transaction(async (conn) => {
+  if (b.phone) b.phone = normalizePhone(b.phone);
+  await withDup(db.transaction(async (conn) => {
     await conn.query(
       `UPDATE users SET full_name=COALESCE(?,full_name), phone=COALESCE(?,phone), email=COALESCE(?,email),
        status=COALESCE(?,status) WHERE id=?`,
@@ -274,7 +394,7 @@ exports.updateDriver = asyncHandler(async (req, res) => {
         );
       }
     }
-  });
+  }));
   await audit(req.user.sub, 'update_driver', 'user', id, b);
   ok(res, null, 'Driver updated');
 });
@@ -366,13 +486,13 @@ exports.documentStatus = asyncHandler(async (req, res) => {
   await audit(req.user.sub, 'document_status', 'driver_document', req.params.id, { status, reason: rejectionReason });
   // Notify the driver who owns this document
   try {
-    const docs = await db.query('SELECT driver_id, type FROM driver_documents WHERE id=?', [req.params.id]);
+    const docs = await db.query('SELECT driver_id, document_type FROM driver_documents WHERE id=?', [req.params.id]);
     if (docs.length) {
       const body = status === 'approved'
-        ? `Your ${docs[0].type || 'document'} was approved.`
+        ? `Your ${String(docs[0].document_type || 'document').replace(/_/g, ' ')} was approved.`
         : status === 'rejected'
-          ? `Your ${docs[0].type || 'document'} was rejected. ${rejectionReason || ''}`.trim()
-          : `Your ${docs[0].type || 'document'} is pending review.`;
+          ? `Your ${String(docs[0].document_type || 'document').replace(/_/g, ' ')} was rejected. ${rejectionReason || ''}`.trim()
+          : `Your ${String(docs[0].document_type || 'document').replace(/_/g, ' ')} is pending review.`;
       await notifyUser(
         docs[0].driver_id,
         status === 'approved' ? 'Document approved' : status === 'rejected' ? 'Document rejected' : 'Document update',
@@ -396,7 +516,7 @@ exports.admins = asyncHandler(async (req, res) => {
 exports.createAdmin = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.fullName || !b.email || !b.password) throw ApiError.badRequest('fullName, email and password are required');
-  if (String(b.password).length < 8) throw ApiError.badRequest('Password must be at least 8 characters');
+  assertStrongPassword(b.password);
   const hash = await hashPassword(b.password);
   try {
     const [u] = await db.pool.query(
@@ -425,14 +545,15 @@ exports.updateAdmin = asyncHandler(async (req, res) => {
   if (b.phone !== undefined) { fields.push('phone=?'); params.push(b.phone || null); }
   if (b.email) { fields.push('email=?'); params.push(b.email); }
   if (b.status) { fields.push('status=?'); params.push(b.status); }
-  if (b.password && String(b.password).length >= 8) {
+  if (b.password) {
+    assertStrongPassword(b.password);
     fields.push('password_hash=?');
     params.push(await hashPassword(b.password));
   }
   if (!fields.length) throw ApiError.badRequest('Nothing to update');
   params.push(id);
   await db.query(`UPDATE users SET ${fields.join(',')} WHERE id=?`, params);
-  await audit(req.user.sub, 'update_admin', 'user', id, b);
+  await audit(req.user.sub, 'update_admin', 'user', id, { ...b, password: b.password ? '[changed]' : undefined });
   ok(res, null, 'Admin updated');
 });
 
@@ -503,10 +624,23 @@ exports.payouts = asyncHandler(async (req, res) => {
 
 exports.payoutStatus = asyncHandler(async (req, res) => {
   const status = req.body.status;
+  const note = String(req.body.note || req.body.adminNote || '').trim().slice(0, 500) || null;
   if (!['approved', 'paid', 'rejected'].includes(status)) throw ApiError.badRequest('Invalid status');
-  const r = await db.query(`UPDATE payout_requests SET status=?, processed_at=UTC_TIMESTAMP() WHERE id=?`, [status, req.params.id]);
-  if (r.affectedRows === 0) throw ApiError.notFound('Payout not found');
-  await audit(req.user.sub, 'payout_status', 'payout', req.params.id, { status });
+  if (status === 'rejected' && !note) throw ApiError.badRequest('A reason is required when rejecting a payout.');
+  const rows = await db.query('SELECT id, driver_id, amount, status FROM payout_requests WHERE id=?', [req.params.id]);
+  if (!rows.length) throw ApiError.notFound('Payout not found');
+  const cur = rows[0].status;
+  const allowed = { pending: ['approved', 'rejected', 'paid'], approved: ['paid', 'rejected'], paid: [], rejected: [] };
+  if (!(allowed[cur] || []).includes(status)) throw ApiError.badRequest(`A ${cur} payout cannot be changed to ${status}.`);
+  await db.query(
+    `UPDATE payout_requests SET status=?, admin_note=COALESCE(?,admin_note), processed_by=?, processed_at=UTC_TIMESTAMP() WHERE id=?`,
+    [status, note, req.user.sub, req.params.id]
+  );
+  await audit(req.user.sub, 'payout_status', 'payout', req.params.id, { status, note });
+  try {
+    const titles = { approved: 'Payout approved', paid: 'Payout sent', rejected: 'Payout rejected' };
+    await notifyUser(rows[0].driver_id, titles[status], `Your payout request of TZS ${Number(rows[0].amount).toLocaleString()} was ${status}.${note ? ' ' + note : ''}`, 'payout_status', { type: 'payout_status', payoutId: String(req.params.id), status });
+  } catch (_) {}
   ok(res, null, 'Payout status updated');
 });
 
@@ -653,68 +787,72 @@ exports.updateCancelSettings = asyncHandler(async (req, res) => {
 });
 
 
-/* -------------------- Rider cancellation policy (admin-editable) -------------------- */
-exports.cancelSettings = asyncHandler(async (req, res) => {
-  const rideService = require('../services/ride.service');
-  const cfg = await rideService.getCancelConfig();
-  ok(res, cfg);
-});
-
-exports.updateCancelSettings = asyncHandler(async (req, res) => {
-  const nearPickupKm = Number(req.body.nearPickupKm);
-  const percent = Number(req.body.percent);
-  if (!Number.isFinite(nearPickupKm) || nearPickupKm < 0 || nearPickupKm > 50) {
-    throw ApiError.badRequest('nearPickupKm must be between 0 and 50');
-  }
-  if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
-    throw ApiError.badRequest('percent must be between 0 and 100');
-  }
-  const value = { nearPickupKm, percent };
-  await db.query(
-    `INSERT INTO app_settings(setting_key,setting_value,updated_by) VALUES(?,?,?)
-     ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value),updated_by=VALUES(updated_by),updated_at=UTC_TIMESTAMP()`,
-    ['rider_cancellation', JSON.stringify(value), req.user.sub]
-  );
-  await db.query(`DELETE FROM app_settings WHERE setting_key = 'rider_cancellation_fee'`).catch(() => {});
-  await audit(req.user.sub, 'update_cancel_settings', 'settings', null, value);
-  ok(res, value, 'Cancellation settings saved. Applied on the next rider cancel.');
-});
-
 /* -------------------- Promos -------------------- */
 exports.promos = asyncHandler(async (req, res) => {
   const rows = await db.query(`SELECT * FROM promos ORDER BY id DESC LIMIT 500`);
   ok(res, rows);
 });
 
+function promoInput(b, partial) {
+  const o = {};
+  const type = b.discountType || b.discount_type;
+  if (type !== undefined && !['percent', 'fixed'].includes(type)) throw ApiError.badRequest('discountType must be percent or fixed');
+  const val = b.discountValue ?? b.discount_value;
+  if (val !== undefined && val !== null && val !== '') {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) throw ApiError.badRequest('discountValue must be greater than 0');
+    if ((type || b.__type) === 'percent' && n > 100) throw ApiError.badRequest('A percentage discount cannot exceed 100');
+    o.discountValue = n;
+  } else if (!partial) throw ApiError.badRequest('discountValue is required');
+  const from = b.validFrom || b.valid_from, until = b.validUntil || b.valid_until;
+  if (from && until && new Date(String(until).replace(' ', 'T')) <= new Date(String(from).replace(' ', 'T'))) {
+    throw ApiError.badRequest('End date must be after the start date');
+  }
+  return o;
+}
+
 exports.createPromo = asyncHandler(async (req, res) => {
   const b = req.body;
-  if (!b.code) throw ApiError.badRequest('code is required');
-  const [r] = await db.pool.query(
-    `INSERT INTO promos(code,title,description,discount_type,discount_value,usage_limit,per_user_limit,valid_from,valid_until,applies_to,is_active)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-    [
-      b.code, b.title || b.code, b.description || null,
-      b.discountType || b.discount_type || 'percent',
-      Number(b.discountValue || b.discount_value || 0),
-      b.usageLimit || b.usage_limit || null,
-      b.perUserLimit || b.per_user_limit || 1,
-      b.validFrom || b.valid_from || new Date().toISOString().slice(0, 19).replace('T', ' '),
-      b.validUntil || b.valid_until || null,
-      b.appliesTo || b.applies_to || 'all',
-      b.isActive !== undefined ? (b.isActive ? 1 : 0) : 1
-    ]
-  );
-  await audit(req.user.sub, 'create_promo', 'promo', r.insertId, { code: b.code });
+  if (!b.code || !/^[A-Za-z0-9_-]{3,40}$/.test(String(b.code).trim())) throw ApiError.badRequest('Code must be 3-40 letters, numbers, - or _');
+  const code = String(b.code).trim().toUpperCase();
+  const { discountValue } = promoInput(b, false);
+  if (!(b.validUntil || b.valid_until)) throw ApiError.badRequest('validUntil is required');
+  let r;
   try {
-    const { notifyMany, allRiderIds } = require('../services/notification.service');
-    const riders = await allRiderIds();
-    await notifyMany(
-      riders,
-      'Special offer',
-      b.title || `Promo ${b.code} is live — save on your next ride.`,
-      'promo',
-      { type: 'promo', code: String(b.code || '') }
+    [r] = await db.pool.query(
+      `INSERT INTO promos(code,title,description,discount_type,discount_value,max_discount,usage_limit,per_user_limit,valid_from,valid_until,applies_to,is_active,created_by)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        code, b.title || code, b.description || null,
+        b.discountType || b.discount_type || 'percent',
+        discountValue,
+        b.maxDiscount != null && b.maxDiscount !== '' ? Number(b.maxDiscount) : null,
+        b.usageLimit || b.usage_limit || null,
+        b.perUserLimit || b.per_user_limit || 1,
+        b.validFrom || b.valid_from || new Date().toISOString().slice(0, 19).replace('T', ' '),
+        b.validUntil || b.valid_until,
+        b.appliesTo || b.applies_to || 'all',
+        b.isActive !== undefined ? (b.isActive ? 1 : 0) : 1,
+        req.user.sub
+      ]
     );
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw ApiError.conflict('A promotion with this code already exists.');
+    throw e;
+  }
+  await audit(req.user.sub, 'create_promo', 'promo', r.insertId, { code });
+  try {
+    if (b.notifyRiders !== false) {
+      const { notifyMany, allRiderIds } = require('../services/notification.service');
+      const riders = await allRiderIds();
+      await notifyMany(
+        riders,
+        'Special offer',
+        b.title || `Promo ${code} is live — save on your next ride.`,
+        'promo',
+        { type: 'promo', code }
+      );
+    }
   } catch (_) {}
   ok(res, { id: r.insertId }, 'Promotion created', 201);
 });
@@ -722,27 +860,39 @@ exports.createPromo = asyncHandler(async (req, res) => {
 exports.updatePromo = asyncHandler(async (req, res) => {
   const b = req.body;
   const id = req.params.id;
-  const existing = await db.query('SELECT id FROM promos WHERE id=?', [id]);
+  const existing = await db.query('SELECT id, discount_type FROM promos WHERE id=?', [id]);
   if (!existing.length) throw ApiError.notFound('Promo not found');
-  await db.query(
-    `UPDATE promos SET
-      code=COALESCE(?,code), title=COALESCE(?,title), description=COALESCE(?,description),
-      discount_type=COALESCE(?,discount_type), discount_value=COALESCE(?,discount_value),
-      usage_limit=COALESCE(?,usage_limit), valid_from=COALESCE(?,valid_from), valid_until=COALESCE(?,valid_until),
-      applies_to=COALESCE(?,applies_to), is_active=COALESCE(?,is_active)
-     WHERE id=?`,
-    [
-      b.code || null, b.title || null, b.description || null,
-      b.discountType || b.discount_type || null,
-      b.discountValue != null ? Number(b.discountValue) : null,
-      b.usageLimit != null ? b.usageLimit : null,
-      b.validFrom || b.valid_from || null,
-      b.validUntil || b.valid_until || null,
-      b.appliesTo || b.applies_to || null,
-      b.isActive !== undefined ? (b.isActive ? 1 : 0) : null,
-      id
-    ]
-  );
+  b.__type = b.discountType || b.discount_type || existing[0].discount_type;
+  promoInput(b, true);
+  const maxDisc = b.maxDiscount === undefined ? undefined : (b.maxDiscount === null || b.maxDiscount === '' ? 0 : Number(b.maxDiscount));
+  try {
+    await db.query(
+      `UPDATE promos SET
+        code=COALESCE(?,code), title=COALESCE(?,title), description=COALESCE(?,description),
+        discount_type=COALESCE(?,discount_type), discount_value=COALESCE(?,discount_value),
+        usage_limit=COALESCE(?,usage_limit), per_user_limit=COALESCE(?,per_user_limit),
+        max_discount=CASE WHEN ? IS NULL THEN max_discount WHEN ?=0 THEN NULL ELSE ? END,
+        valid_from=COALESCE(?,valid_from), valid_until=COALESCE(?,valid_until),
+        applies_to=COALESCE(?,applies_to), is_active=COALESCE(?,is_active)
+       WHERE id=?`,
+      [
+        b.code ? String(b.code).trim().toUpperCase() : null, b.title || null, b.description || null,
+        b.discountType || b.discount_type || null,
+        b.discountValue != null ? Number(b.discountValue) : null,
+        b.usageLimit != null ? b.usageLimit : null,
+        b.perUserLimit != null ? b.perUserLimit : null,
+        maxDisc === undefined ? null : maxDisc, maxDisc === undefined ? null : maxDisc, maxDisc === undefined ? null : maxDisc,
+        b.validFrom || b.valid_from || null,
+        b.validUntil || b.valid_until || null,
+        b.appliesTo || b.applies_to || null,
+        b.isActive !== undefined ? (b.isActive ? 1 : 0) : null,
+        id
+      ]
+    );
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') throw ApiError.conflict('A promotion with this code already exists.');
+    throw e;
+  }
   await audit(req.user.sub, 'update_promo', 'promo', id, b);
   ok(res, null, 'Promotion updated');
 });
@@ -764,14 +914,17 @@ exports.createTour = asyncHandler(async (req, res) => {
   const b = req.body;
   if (!b.name && !b.package) throw ApiError.badRequest('name is required');
   const [r] = await db.pool.query(
-    `INSERT INTO tour_packages(name,description,base_price,duration_hours,max_tourists,is_active)
-     VALUES(?,?,?,?,?,?)`,
+    `INSERT INTO tour_packages(name,description,base_price,duration_hours,max_tourists,pickup_notes,image_url,is_active,created_by)
+     VALUES(?,?,?,?,?,?,?,?,?)`,
     [
       b.name || b.package, b.description || null,
       Number(b.base_price || b.price || 0),
       Number(b.duration_hours || b.duration || 4),
       Number(b.max_tourists || b.max || 6),
-      b.is_active !== undefined ? (b.is_active ? 1 : 0) : 1
+      b.pickup_notes || b.pickupNotes || null,
+      b.image_url || b.imageUrl || null,
+      b.is_active !== undefined ? (b.is_active ? 1 : 0) : 1,
+      req.user.sub
     ]
   );
   await audit(req.user.sub, 'create_tour', 'tour_package', r.insertId);
@@ -792,13 +945,16 @@ exports.updateTour = asyncHandler(async (req, res) => {
     `UPDATE tour_packages SET
       name=COALESCE(?,name), description=COALESCE(?,description),
       base_price=COALESCE(?,base_price), duration_hours=COALESCE(?,duration_hours),
-      max_tourists=COALESCE(?,max_tourists), is_active=COALESCE(?,is_active)
+      max_tourists=COALESCE(?,max_tourists), pickup_notes=COALESCE(?,pickup_notes), image_url=COALESCE(?,image_url),
+      is_active=COALESCE(?,is_active)
      WHERE id=?`,
     [
       b.name || b.package || null, b.description || null,
       b.base_price != null || b.price != null ? Number(b.base_price || b.price) : null,
       b.duration_hours != null || b.duration != null ? Number(b.duration_hours || b.duration) : null,
       b.max_tourists != null || b.max != null ? Number(b.max_tourists || b.max) : null,
+      b.pickup_notes || b.pickupNotes || null,
+      b.image_url || b.imageUrl || null,
       b.is_active !== undefined ? (b.is_active ? 1 : 0) : (b.status === 'Active' ? 1 : b.status === 'Paused' ? 0 : null),
       id
     ]
@@ -849,16 +1005,34 @@ exports.markNotificationRead = asyncHandler(async (req, res) => {
 });
 
 exports.sendNotification = asyncHandler(async (req, res) => {
-  const b = req.body;
-  if (!b.title || !b.body) throw ApiError.badRequest('title and body are required');
-  if (!b.userId) throw ApiError.badRequest('userId is required');
-  const [r] = await db.pool.query(
-    `INSERT INTO notifications(user_id,type,title,body,data) VALUES(?,?,?,?,?)`,
-    [b.userId, b.type || 'admin', b.title, b.body, b.data ? JSON.stringify(b.data) : null]
-  );
-  try { await notifyUser(b.userId, b.title, b.body, { type: b.type || 'admin' }); } catch (_) {}
-  await audit(req.user.sub, 'send_notification', 'notification', r.insertId);
-  ok(res, { id: r.insertId }, 'Notification sent', 201);
+  const b = req.body || {};
+  const title = String(b.title || '').trim();
+  const body = String(b.body || '').trim();
+  if (!title || !body) throw ApiError.badRequest('title and body are required');
+  if (title.length > 150) throw ApiError.badRequest('Title must be 150 characters or fewer');
+  if (body.length > 500) throw ApiError.badRequest('Message must be 500 characters or fewer');
+  const type = String(b.type || 'admin').slice(0, 50);
+  const audience = b.audience || (b.userId ? 'user' : null);
+  const { notifyMany } = require('../services/notification.service');
+  let ids = [];
+  if (audience === 'user') {
+    const u = await db.query('SELECT id FROM users WHERE id=?', [Number(b.userId)]);
+    if (!u.length) throw ApiError.notFound('Recipient not found');
+    ids = [u[0].id];
+  } else if (audience === 'all_riders') {
+    ids = (await db.query(`SELECT id FROM users WHERE role='rider' AND status='active'`)).map((r) => r.id);
+  } else if (audience === 'all_drivers') {
+    ids = (await db.query(`SELECT id FROM users WHERE role='driver' AND status='active'`)).map((r) => r.id);
+  } else if (audience === 'online_drivers') {
+    ids = (await db.query(`SELECT u.id FROM users u JOIN driver_profiles d ON d.user_id=u.id WHERE u.status='active' AND d.online=1`)).map((r) => r.id);
+  } else {
+    throw ApiError.badRequest('A valid audience or userId is required');
+  }
+  if (!ids.length) throw ApiError.badRequest('No active recipients match this audience');
+  if (ids.length > 5000) throw ApiError.badRequest('Audience too large for a single send');
+  await notifyMany(ids, title, body, type, { type, source: 'admin' });
+  await audit(req.user.sub, 'send_notification', 'notification', null, { audience, recipients: ids.length, title });
+  ok(res, { recipients: ids.length }, `Notification sent to ${ids.length} recipient${ids.length === 1 ? '' : 's'}`, 201);
 });
 
 /* -------------------- Conversations / Support chat -------------------- */
@@ -968,7 +1142,10 @@ exports.archives = asyncHandler(async (req, res) => {
 
 exports.archive = asyncHandler(async (req, res) => {
   const row = await archiveService.getArchive(req.params.id);
-  // Do not dump full snapshot to list clients unless detail requested
+  const strip = (v) => Array.isArray(v) ? v.map(strip)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !/pass(word)?|hash|token|secret/i.test(k)).map(([k, x]) => [k, strip(x)]))
+    : v;
+  row.snapshot = strip(row.snapshot);
   ok(res, row);
 });
 
@@ -994,7 +1171,7 @@ exports.driverReports = asyncHandler(async (req, res) => {
        FROM driver_reports r
        LEFT JOIN users reporter ON reporter.id = r.reporter_id
        LEFT JOIN users driver ON driver.id = r.driver_id
-       ORDER BY r.id DESC LIMIT 200`
+       ORDER BY r.id DESC LIMIT 500`
     );
     ok(res, rows);
   } catch (e) {
@@ -1004,9 +1181,285 @@ exports.driverReports = asyncHandler(async (req, res) => {
 
 exports.updateDriverReport = asyncHandler(async (req, res) => {
   const status = req.body.status;
+  const note = String(req.body.note || req.body.adminNote || '').trim().slice(0, 500) || null;
   if (!['open', 'reviewed', 'dismissed'].includes(status)) {
     throw ApiError.badRequest('Invalid status');
   }
-  await db.query('UPDATE driver_reports SET status=? WHERE id=?', [status, req.params.id]);
+  await addColumnIfMissing('driver_reports', 'admin_note', 'VARCHAR(500) NULL');
+  await addColumnIfMissing('driver_reports', 'reviewed_by', 'BIGINT UNSIGNED NULL');
+  await addColumnIfMissing('driver_reports', 'reviewed_at', 'DATETIME NULL');
+  const r = await db.query(
+    'UPDATE driver_reports SET status=?, admin_note=COALESCE(?,admin_note), reviewed_by=?, reviewed_at=UTC_TIMESTAMP() WHERE id=?',
+    [status, note, req.user.sub, req.params.id]
+  );
+  if (r.affectedRows === 0) throw ApiError.notFound('Report not found');
+  await audit(req.user.sub, 'driver_report_status', 'driver_report', req.params.id, { status, note });
   ok(res, null, 'Report updated');
+});
+
+
+/* ==================== Rider detail ==================== */
+exports.rider = asyncHandler(async (req, res) => {
+  const id = req.params.id;
+  const rows = await db.query(`
+    SELECT u.id, u.full_name fullName, u.phone, u.email, u.status, u.photo_url photoUrl, u.island, u.region, u.district, u.ward,
+           u.created_at createdAt, u.last_login_at lastLoginAt,
+           COALESCE(w.balance,0) walletBalance, w.currency,
+           COALESCE(r.total_rides,0) totalRides, COALESCE(r.rating,0) rating,
+           COALESCE(r.cancellation_debt,0) cancellationDebt, r.referral_code referralCode,
+           r.emergency_name emergencyName, r.emergency_phone emergencyPhone
+    FROM users u
+    LEFT JOIN wallets w ON w.user_id=u.id
+    LEFT JOIN rider_profiles r ON r.user_id=u.id
+    WHERE u.id=? AND u.role='rider'`, [id]);
+  if (!rows.length) throw ApiError.notFound('Rider not found');
+  const safe = async (fn, fb) => { try { return await fn(); } catch (_) { return fb; } };
+  const recentRides = await db.query(
+    `SELECT r.id, r.ride_code, r.ride_type, r.status, r.pickup_address, r.destination_address, r.final_fare, r.estimated_fare, r.payment_method, r.created_at, du.full_name driverName
+     FROM rides r LEFT JOIN users du ON du.id=r.driver_id WHERE r.rider_id=? ORDER BY r.id DESC LIMIT 15`, [id]);
+  const walletTransactions = await safe(() => db.query(
+    'SELECT id, type, amount, balance_after, status, payment_method, description, created_at FROM wallet_transactions WHERE user_id=? ORDER BY id DESC LIMIT 15', [id]), []);
+  const reportsAgainst = await safe(() => db.query(
+    `SELECT r.id, r.reason, r.status, r.created_at, d.full_name driverName FROM driver_reports r LEFT JOIN users d ON d.id=r.driver_id WHERE r.reporter_id=? ORDER BY r.id DESC LIMIT 10`, [id]), []);
+  const stats = (await db.query(
+    `SELECT COUNT(*) total, SUM(status='completed') completed, SUM(status='cancelled') cancelled,
+            COALESCE(SUM(CASE WHEN status='completed' THEN final_fare END),0) spent FROM rides WHERE rider_id=?`, [id]))[0] || {};
+  ok(res, { profile: rows[0], recentRides, walletTransactions, reportsFiled: reportsAgainst, stats });
+});
+
+/* ==================== Document review queue ==================== */
+exports.documents = asyncHandler(async (req, res) => {
+  const rows = await db.query(`
+    SELECT dd.id, dd.driver_id driverId, dd.document_type documentType, dd.url, dd.resource_type resourceType,
+           dd.expires_at expiresAt, dd.status, dd.rejection_reason rejectionReason, dd.verified_at verifiedAt,
+           dd.created_at createdAt, u.full_name driverName, u.phone driverPhone, d.application_status applicationStatus,
+           a.full_name verifiedByName,
+           (SELECT COUNT(*) FROM driver_documents n2 WHERE n2.driver_id=dd.driver_id AND n2.document_type=dd.document_type AND n2.id>dd.id AND n2.status IN ('approved','pending')) newerCount
+    FROM driver_documents dd
+    JOIN users u ON u.id = dd.driver_id
+    LEFT JOIN driver_profiles d ON d.user_id = dd.driver_id
+    LEFT JOIN users a ON a.id = dd.verified_by
+    ORDER BY (dd.status='pending') DESC, dd.id DESC LIMIT 1500`);
+  ok(res, rows);
+});
+
+/* ==================== Driver change requests ==================== */
+async function ensureChangeRequests() {
+  await db.query(`CREATE TABLE IF NOT EXISTS driver_change_requests (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT, driver_id BIGINT NOT NULL, request_type VARCHAR(32) NOT NULL,
+    field_name VARCHAR(64) NOT NULL, new_value TEXT, reason TEXT, status VARCHAR(32) DEFAULT 'pending',
+    rejection_reason TEXT, meta JSON, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, INDEX (driver_id), INDEX (status)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await addColumnIfMissing('driver_change_requests', 'reviewed_by', 'BIGINT NULL');
+  await addColumnIfMissing('driver_change_requests', 'reviewed_at', 'DATETIME NULL');
+}
+
+// Portable across MySQL and MariaDB (no "ADD COLUMN IF NOT EXISTS").
+async function addColumnIfMissing(table, column, ddl) {
+  try {
+    const r = await db.query(
+      'SELECT COUNT(*) n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+      [table, column]
+    );
+    if (!Number(r[0].n)) await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${ddl}`);
+  } catch (e) { console.warn('[addColumnIfMissing]', table, column, e.message); }
+}
+
+function parseJson(v) {
+  if (v == null) return null;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch (_) { return null; }
+}
+
+exports.changeRequests = asyncHandler(async (req, res) => {
+  await ensureChangeRequests();
+  const rows = await db.query(`
+    SELECT c.*, u.full_name driverName, u.phone driverPhone, u.email driverEmail, d.driver_code driverCode, rv.full_name reviewedByName
+    FROM driver_change_requests c
+    JOIN users u ON u.id = c.driver_id
+    LEFT JOIN driver_profiles d ON d.user_id = c.driver_id
+    LEFT JOIN users rv ON rv.id = c.reviewed_by
+    ORDER BY (c.status='pending') DESC, c.id DESC LIMIT 1000`);
+  // Attach the driver's current values so the admin can compare before approving
+  const profileCols = { full_name: 'u.full_name', phone: 'u.phone', email: 'u.email', home_address: 'd.home_address', national_id: 'd.national_id' };
+  for (const r of rows) {
+    r.meta = parseJson(r.meta);
+    if (r.request_type === 'vehicle') r.newValueParsed = parseJson(r.new_value);
+    if (r.status !== 'pending') continue;
+    try {
+      if (r.request_type === 'profile' && profileCols[r.field_name]) {
+        const [cur] = await db.query(`SELECT ${profileCols[r.field_name]} v FROM users u JOIN driver_profiles d ON d.user_id=u.id WHERE u.id=?`, [r.driver_id]);
+        r.currentValue = cur ? cur.v : null;
+      } else if (r.request_type === 'vehicle') {
+        const [veh] = await db.query(`SELECT type vehicleType, plate_number plateNumber, make vehicleMake, model vehicleModel, color vehicleColor, model_year modelYear FROM vehicles WHERE driver_id=? ORDER BY (status='active') DESC, id DESC LIMIT 1`, [r.driver_id]);
+        r.currentValue = veh || null;
+      } else if (r.request_type === 'document') {
+        const [doc] = await db.query(`SELECT id, url, status, expires_at expiresAt FROM driver_documents WHERE driver_id=? AND document_type=? ORDER BY id DESC LIMIT 1`, [r.driver_id, normalizeDocType(r.field_name)]);
+        r.currentValue = doc || null;
+      }
+    } catch (_) {}
+  }
+  ok(res, rows);
+});
+
+function normalizeDocType(name) {
+  const n = String(name || '').toLowerCase().replace(/[\s-]+/g, '_');
+  const map = {
+    license: 'drivers_license', licence: 'drivers_license', driver_license: 'drivers_license', drivers_license: 'drivers_license', driving_license: 'drivers_license', driving_licence: 'drivers_license',
+    national_id: 'national_id', nationalid: 'national_id', nida: 'national_id', id: 'national_id',
+    insurance: 'insurance', vehicle_insurance: 'insurance',
+    vehicle_photo: 'vehicle_photo', vehicle: 'vehicle_photo', driver_photo: 'driver_photo', photo: 'driver_photo'
+  };
+  return map[n] || 'other';
+}
+
+exports.reviewChangeRequest = asyncHandler(async (req, res) => {
+  await ensureChangeRequests();
+  const status = req.body.status;
+  const reason = String(req.body.reason || req.body.rejectionReason || '').trim().slice(0, 500);
+  if (!['approved', 'rejected'].includes(status)) throw ApiError.badRequest('Status must be approved or rejected');
+  if (status === 'rejected' && !reason) throw ApiError.badRequest('A reason is required when rejecting a request.');
+  const rows = await db.query('SELECT * FROM driver_change_requests WHERE id=?', [req.params.id]);
+  if (!rows.length) throw ApiError.notFound('Change request not found');
+  const cr = rows[0];
+  if (cr.status !== 'pending') throw ApiError.conflict(`This request was already ${cr.status}.`);
+  const meta = parseJson(cr.meta) || {};
+
+  if (status === 'approved') {
+    await withDup(db.transaction(async (conn) => {
+      if (cr.request_type === 'profile') {
+        const val = String(cr.new_value || '').trim();
+        if (!val) throw ApiError.badRequest('The request has no new value to apply.');
+        if (cr.field_name === 'full_name') await conn.query('UPDATE users SET full_name=? WHERE id=?', [val, cr.driver_id]);
+        else if (cr.field_name === 'phone') await conn.query('UPDATE users SET phone=? WHERE id=?', [normalizePhone(val), cr.driver_id]);
+        else if (cr.field_name === 'email') await conn.query('UPDATE users SET email=? WHERE id=?', [val.toLowerCase(), cr.driver_id]);
+        else if (cr.field_name === 'home_address') await conn.query('UPDATE driver_profiles SET home_address=? WHERE user_id=?', [val, cr.driver_id]);
+        else if (cr.field_name === 'national_id') await conn.query('UPDATE driver_profiles SET national_id=? WHERE user_id=?', [val, cr.driver_id]);
+        else throw ApiError.badRequest('Unsupported profile field');
+      } else if (cr.request_type === 'vehicle') {
+        const v = parseJson(cr.new_value) || {};
+        const [veh] = await conn.query(`SELECT id FROM vehicles WHERE driver_id=? ORDER BY (status='active') DESC, id DESC LIMIT 1`, [cr.driver_id]);
+        const type = v.vehicleType ? String(v.vehicleType).toLowerCase() : null;
+        if (type && !['boda', 'bajaji', 'taxi'].includes(type)) throw ApiError.badRequest('Invalid vehicle type in request');
+        const year = v.modelYear ? Number(v.modelYear) : null;
+        const vals = [type, v.plateNumber || null, v.vehicleMake || null, v.vehicleModel || null, v.vehicleColor || null, Number.isFinite(year) ? year : null];
+        if (veh.length) {
+          await conn.query(`UPDATE vehicles SET type=COALESCE(?,type), plate_number=COALESCE(?,plate_number), make=COALESCE(?,make), model=COALESCE(?,model), color=COALESCE(?,color), model_year=COALESCE(?,model_year) WHERE id=?`, [...vals, veh[0].id]);
+        } else {
+          await conn.query('INSERT INTO vehicles(driver_id,type,plate_number,make,model,color,model_year,status) VALUES(?,?,?,?,?,?,?,?)', [cr.driver_id, type || 'taxi', v.plateNumber || `TMP-${cr.driver_id}`, v.vehicleMake || null, v.vehicleModel || null, v.vehicleColor || null, vals[5], 'active']);
+        }
+      } else if (cr.request_type === 'document') {
+        if (!cr.new_value) throw ApiError.badRequest('No file was attached to this request, so it cannot be approved.');
+        await conn.query(
+          `INSERT INTO driver_documents(driver_id, document_type, public_id, url, resource_type, expires_at, status, verified_by, verified_at)
+           VALUES(?,?,?,?,?,?, 'approved', ?, UTC_TIMESTAMP())`,
+          [cr.driver_id, normalizeDocType(cr.field_name), meta.publicId || null, cr.new_value, meta.resourceType || 'image', meta.expiresAt || null, req.user.sub]
+        );
+      }
+      await conn.query(
+        `UPDATE driver_change_requests SET status='approved', rejection_reason=NULL, reviewed_by=?, reviewed_at=UTC_TIMESTAMP() WHERE id=?`,
+        [req.user.sub, cr.id]
+      );
+    }));
+  } else {
+    await db.query(
+      `UPDATE driver_change_requests SET status='rejected', rejection_reason=?, reviewed_by=?, reviewed_at=UTC_TIMESTAMP() WHERE id=?`,
+      [reason, req.user.sub, cr.id]
+    );
+  }
+  await audit(req.user.sub, `change_request_${status}`, 'driver_change_request', cr.id, { type: cr.request_type, field: cr.field_name, reason: reason || null });
+  try {
+    const label = cr.request_type === 'vehicle' ? 'vehicle details' : String(cr.field_name).replace(/_/g, ' ');
+    await notifyUser(
+      cr.driver_id,
+      status === 'approved' ? 'Change request approved' : 'Change request rejected',
+      status === 'approved' ? `Your request to update your ${label} was approved.` : `Your request to update your ${label} was rejected. ${reason}`,
+      'change_request',
+      { type: 'change_request', requestId: String(cr.id), status }
+    );
+  } catch (_) {}
+  ok(res, { status }, `Request ${status}`);
+});
+
+/* ==================== Settlements, tour bookings, ratings, wallet ledger ==================== */
+exports.settlements = asyncHandler(async (req, res) => {
+  const rows = await db.query(`
+    SELECT s.*, u.full_name driverName, u.phone driverPhone
+    FROM driver_settlements s JOIN users u ON u.id=s.driver_id
+    ORDER BY s.id DESC LIMIT 1000`);
+  ok(res, rows.map((r) => { delete r.metadata; return r; }));
+});
+
+exports.tourBookings = asyncHandler(async (req, res) => {
+  const rows = await db.query(`
+    SELECT b.*, p.name packageName, ru.full_name riderName, ru.phone riderPhone, du.full_name driverName, du.phone driverPhone
+    FROM tour_bookings b
+    JOIN tour_packages p ON p.id=b.package_id
+    JOIN users ru ON ru.id=b.rider_id
+    LEFT JOIN users du ON du.id=b.driver_id
+    ORDER BY b.id DESC LIMIT 1000`);
+  ok(res, rows);
+});
+
+exports.ratings = asyncHandler(async (req, res) => {
+  const rows = await db.query(`
+    SELECT rt.id, rt.ride_id rideId, rt.stars, rt.feedback, rt.created_at createdAt,
+           fu.full_name fromName, fu.role fromRole, tu.full_name toName, tu.role toRole, r.ride_code rideCode
+    FROM ratings rt
+    JOIN users fu ON fu.id=rt.from_user_id
+    JOIN users tu ON tu.id=rt.to_user_id
+    LEFT JOIN rides r ON r.id=rt.ride_id
+    ORDER BY rt.id DESC LIMIT 1000`);
+  ok(res, rows);
+});
+
+exports.walletTransactions = asyncHandler(async (req, res) => {
+  const rows = await db.query(`
+    SELECT t.id, t.user_id userId, u.full_name userName, u.role userRole, t.type, t.amount, t.balance_before balanceBefore,
+           t.balance_after balanceAfter, t.status, t.payment_method paymentMethod, t.description, t.created_at createdAt
+    FROM wallet_transactions t JOIN users u ON u.id=t.user_id
+    ORDER BY t.id DESC LIMIT 1000`);
+  ok(res, rows);
+});
+
+/* ==================== Current admin profile ==================== */
+exports.me = asyncHandler(async (req, res) => {
+  const rows = await db.query(`SELECT id, full_name fullName, email, phone, status, created_at createdAt, last_login_at lastLoginAt FROM users WHERE id=? AND role='admin'`, [req.user.sub]);
+  if (!rows.length) throw ApiError.notFound('Admin not found');
+  ok(res, rows[0]);
+});
+
+exports.updateMe = asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  const fields = []; const params = [];
+  if (b.fullName !== undefined) {
+    const n = String(b.fullName).trim();
+    if (n.length < 2) throw ApiError.badRequest('Name is too short');
+    fields.push('full_name=?'); params.push(n);
+  }
+  if (b.phone !== undefined) { fields.push('phone=?'); params.push(b.phone ? normalizePhone(b.phone) : null); }
+  if (!fields.length) throw ApiError.badRequest('Nothing to update');
+  params.push(req.user.sub);
+  await withDup(db.query(`UPDATE users SET ${fields.join(',')} WHERE id=?`, params));
+  await audit(req.user.sub, 'update_own_profile', 'user', req.user.sub);
+  ok(res, null, 'Profile updated');
+});
+
+exports.changeMyPassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  const { comparePassword } = require('../utils/hash');
+  if (!currentPassword || !newPassword) throw ApiError.badRequest('Current and new password are required');
+  if (String(newPassword).length < 10) throw ApiError.badRequest('New password must be at least 10 characters');
+  if (!/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) || !/\d/.test(newPassword)) {
+    throw ApiError.badRequest('Use upper and lower case letters and at least one number');
+  }
+  const rows = await db.query(`SELECT password_hash FROM users WHERE id=? AND role='admin'`, [req.user.sub]);
+  if (!rows.length || !(await comparePassword(currentPassword, rows[0].password_hash))) {
+    throw ApiError.unauthorized('Current password is incorrect');
+  }
+  await db.query('UPDATE users SET password_hash=? WHERE id=?', [await hashPassword(newPassword), req.user.sub]);
+  await db.query('UPDATE refresh_tokens SET revoked_at=UTC_TIMESTAMP() WHERE user_id=? AND revoked_at IS NULL', [req.user.sub]).catch(() => {});
+  await audit(req.user.sub, 'change_own_password', 'user', req.user.sub);
+  ok(res, null, 'Password changed. Please sign in again.');
 });
