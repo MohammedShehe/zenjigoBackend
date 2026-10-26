@@ -66,12 +66,44 @@ function code(prefix = 'ZG') {
 }
 
 /**
- * Prefer Google Distance Matrix (road distance + duration) when GOOGLE_MAPS_API_KEY is set.
+ * Prefers Google Routes API (road distance + duration), then Distance Matrix, when GOOGLE_MAPS_API_KEY is set.
  * Falls back to Haversine + speed estimate so the system always works.
  */
 async function getRouteMetrics(pickupLat, pickupLng, destLat, destLng) {
   const key = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_DISTANCE_MATRIX_KEY || '';
   if (key) {
+    // 1) Routes API (the current Google routing API).
+    try {
+      const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration'
+        },
+        body: JSON.stringify({
+          origin: { location: { latLng: { latitude: pickupLat, longitude: pickupLng } } },
+          destination: { location: { latLng: { latitude: destLat, longitude: destLng } } },
+          travelMode: 'DRIVE',
+          routingPreference: 'TRAFFIC_AWARE'
+        })
+      });
+      const data = await res.json();
+      const r = data && data.routes && data.routes[0];
+      if (r && r.distanceMeters != null && r.duration) {
+        const seconds = parseInt(String(r.duration).replace('s', ''), 10);
+        if (Number.isFinite(seconds)) {
+          return {
+            distanceKm: Number((r.distanceMeters / 1000).toFixed(2)),
+            durationMin: Math.max(1, Math.ceil(seconds / 60)),
+            source: 'google-routes'
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[ride] Google Routes API failed, trying Distance Matrix:', e.message);
+    }
+    // 2) Legacy Distance Matrix (only works if that API is enabled on the key).
     try {
       const origin = `${pickupLat},${pickupLng}`;
       const dest = `${destLat},${destLng}`;

@@ -109,10 +109,17 @@
   const loadGoogleMaps = () => gmapsP || (gmapsP = new Promise(async (res, rej) => {
     if (window.google && window.google.maps) return res(window.google.maps);
     let key = '';
-    try { const c = await get('/admin/maps-config', { fresh: true }); key = (c && c.key) || ''; } catch (e) { gmapsP = null; return rej(new Error('Could not load the map configuration.')); }
+    try { const c = await get('/admin/maps-config', { fresh: true }); key = (c && c.key) || ''; } catch (e) { gmapsP = null; return rej(new Error('Could not load the map configuration (' + (e && e.message ? e.message : 'unknown error') + '). If this says “not found”, the backend has not been redeployed with the new /admin/maps-config route.')); }
     if (!key) { gmapsP = null; return rej(new Error('GOOGLE_MAPS_BROWSER_KEY (or GOOGLE_MAPS_API_KEY) is not set on the server.')); }
     window.gm_authFailure = () => { gmapsP = null; const m = document.getElementById('map'); if (m) m.innerHTML = '<div class="empty"><h4>Google Maps rejected the key</h4><p>Enable “Maps JavaScript API”, enable billing, and allow this site in the key’s HTTP-referrer restrictions.</p></div>'; };
-    window.__zgMapsReady = () => res(window.google.maps);
+    // With loading=async the classes live in libraries; import the ones the live map uses before resolving.
+    window.__zgMapsReady = async () => {
+      try {
+        const m = window.google.maps;
+        if (m.importLibrary) await Promise.all([m.importLibrary('maps'), m.importLibrary('core'), m.importLibrary('marker')]);
+        res(m);
+      } catch (e) { gmapsP = null; rej(new Error('Google Maps libraries failed to load.')); }
+    };
     const s = document.createElement('script'); s.async = true; s.defer = true;
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) + '&callback=__zgMapsReady&loading=async&v=weekly';
     s.onerror = () => { gmapsP = null; rej(new Error('Google Maps could not be loaded.')); };
