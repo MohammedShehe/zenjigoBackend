@@ -1097,6 +1097,12 @@ exports.audit = asyncHandler(async (req, res) => {
 /**
  * Live operations map data: active rides + online drivers with coordinates.
  */
+// Browser key for the admin console's Google Map. Only returned to authenticated admins.
+// Prefer a dedicated key (GOOGLE_MAPS_BROWSER_KEY) restricted to the admin site's HTTP referrer.
+exports.mapsConfig = asyncHandler(async (req, res) => {
+  ok(res, { key: process.env.GOOGLE_MAPS_BROWSER_KEY || process.env.GOOGLE_MAPS_API_KEY || '' });
+});
+
 exports.liveMap = asyncHandler(async (req, res) => {
   const rides = await db.query(`
     SELECT r.id, r.ride_code rideCode, r.ride_type rideType, r.status,

@@ -49,6 +49,7 @@ router.delete('/admins/:id', c.deleteAdmin);
 router.get('/rides', c.rides);
 router.get('/rides/:id', c.ride);
 router.get('/live-map', c.liveMap);
+router.get('/maps-config', c.mapsConfig);
 
 // Finance
 router.get('/payments', c.payments);

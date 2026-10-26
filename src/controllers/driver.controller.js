@@ -20,7 +20,10 @@ exports.requests=asyncHandler(async(req,res)=>{
  ok(res,{restricted:false,settlementRequired:false,requests:rows});
 });
 exports.accept=asyncHandler(async(req,res)=>ok(res,await ride.accept(req.user.sub,req.params.id),'Ride accepted'));
-exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status),'Ride status updated'));
+exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status,{otp:req.body.otp}),'Ride status updated'));
+exports.getRide=asyncHandler(async(req,res)=>ok(res,await ride.getById(req.params.id,req.user.sub)));
+exports.reachedDestination=asyncHandler(async(req,res)=>ok(res,await ride.reachedDestination(req.user.sub,req.params.id),'Destination reached'));
+exports.collectCash=asyncHandler(async(req,res)=>ok(res,await ride.collectCash(req.user.sub,req.params.id),'Cash received'));
 exports.history=asyncHandler(async(req,res)=>ok(res,await ride.listForUser(req.user.sub,'driver',req.query.limit)));
 
 exports.finance=asyncHandler(async(req,res)=>ok(res,await finance.getStatus(req.user.sub)));

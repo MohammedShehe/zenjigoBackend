@@ -217,7 +217,67 @@ async function findSettlementFromWebhook(event) {
   return finance.findSettlementFromWebhook(event);
 }
 
+
+/**
+ * Start a mobile-money charge for a ride fare. The ride only completes when the provider
+ * webhook confirms the money was collected (see routes/payment.routes.js).
+ */
+async function initiateRidePayment({ userId, rideId, amount, phone, currency }) {
+  const amt = Number(amount);
+  if (!amt || amt <= 0) throw ApiError.badRequest('Nothing to pay for this ride.');
+  const reference = `ZENJIGO-RIDE-${rideId}-${Date.now()}`;
+  const insert = await db.query(
+    `INSERT INTO payment_transactions (user_id, amount, currency, provider, status, external_reference, metadata)
+     VALUES (?, ?, ?, 'paygrid', 'pending', ?, ?)`,
+    [userId, amt, currency || config.ride.currency || 'TZS', reference,
+      JSON.stringify({ phone, requestedBy: userId, channel: 'ride_payment', rideId: String(rideId) })]
+  );
+  const paymentId = insert.insertId;
+  try {
+    const users = await db.query('SELECT full_name, email FROM users WHERE id = ? LIMIT 1', [userId]);
+    const u = users[0] || {};
+    const parts = String(u.full_name || 'ZenjiGO Rider').trim().split(/\s+/);
+    const result = await provider.initiateCollect({
+      amount: amt,
+      currency: currency || config.ride.currency || 'TZS',
+      userId,
+      phone,
+      reference,
+      customer: { firstname: parts[0] || 'ZenjiGO', lastname: parts.slice(1).join(' ') || 'Rider', email: u.email || `user${userId}@zenjigo.online` },
+      channel: 'ride_payment',
+      metadata: { paymentId, rideId: String(rideId) }
+    });
+    if (result.externalReference && result.externalReference !== reference) {
+      await db.query('UPDATE payment_transactions SET external_reference = ? WHERE id = ?', [result.externalReference, paymentId]);
+    }
+    return { paymentId, status: result.status || 'pending', externalReference: result.externalReference || reference };
+  } catch (err) {
+    await failPayment(paymentId, err.message);
+    throw ApiError.badRequest(err.message || 'Payment could not be started.');
+  }
+}
+
+/** Mark a ride-payment row successful (idempotent). Returns the row. */
+async function markPaymentSuccess(paymentId, externalReference) {
+  await db.query(
+    `UPDATE payment_transactions SET status='success', external_reference = COALESCE(?, external_reference) WHERE id = ? AND status <> 'success'`,
+    [externalReference || null, paymentId]
+  );
+  const rows = await db.query('SELECT * FROM payment_transactions WHERE id = ?', [paymentId]);
+  return rows[0];
+}
+
+function paymentChannel(row) {
+  try {
+    const m = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    return { channel: m.channel || null, rideId: m.rideId || null };
+  } catch (_) { return { channel: null, rideId: null }; }
+}
+
 module.exports = {
+  initiateRidePayment,
+  markPaymentSuccess,
+  paymentChannel,
   verifySignature,
   findSettlementFromWebhook,
   completeWalletTopup,

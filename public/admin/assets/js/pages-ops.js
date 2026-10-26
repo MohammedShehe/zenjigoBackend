@@ -104,11 +104,19 @@
   };
 
   /* ============================== Live operations ============================== */
-  let leafletP;
-  const loadLeaflet = () => leafletP || (leafletP = new Promise((res, rej) => {
-    if (window.L) return res(window.L);
-    const css = document.createElement('link'); css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'; document.head.append(css);
-    const s = document.createElement('script'); s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'; s.onload = () => res(window.L); s.onerror = () => { leafletP = null; rej(new Error('Map library could not be loaded.')); }; document.head.append(s);
+  /* Google Maps JavaScript API — key is fetched from the backend (admin-authenticated), never hard-coded. */
+  let gmapsP;
+  const loadGoogleMaps = () => gmapsP || (gmapsP = new Promise(async (res, rej) => {
+    if (window.google && window.google.maps) return res(window.google.maps);
+    let key = '';
+    try { const c = await get('/admin/maps-config', { fresh: true }); key = (c && c.key) || ''; } catch (e) { gmapsP = null; return rej(new Error('Could not load the map configuration.')); }
+    if (!key) { gmapsP = null; return rej(new Error('GOOGLE_MAPS_BROWSER_KEY (or GOOGLE_MAPS_API_KEY) is not set on the server.')); }
+    window.gm_authFailure = () => { gmapsP = null; const m = document.getElementById('map'); if (m) m.innerHTML = '<div class="empty"><h4>Google Maps rejected the key</h4><p>Enable “Maps JavaScript API”, enable billing, and allow this site in the key’s HTTP-referrer restrictions.</p></div>'; };
+    window.__zgMapsReady = () => res(window.google.maps);
+    const s = document.createElement('script'); s.async = true; s.defer = true;
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) + '&callback=__zgMapsReady&loading=async&v=weekly';
+    s.onerror = () => { gmapsP = null; rej(new Error('Google Maps could not be loaded.')); };
+    document.head.append(s);
   }));
   Z.pages.live = {
     title: 'Live operations', subtitle: 'Active rides and online drivers, refreshed automatically',
@@ -117,22 +125,28 @@
         <div class="grid g-4" style="margin-bottom:18px" id="liveKpi"></div>
         <div class="live-grid"><div class="card"><div class="card-h"><h3>Map</h3><div class="legend"><span><i style="background:#12b76a"></i>Driver</span><span><i style="background:#1570ef"></i>Pickup</span><span><i style="background:#d92d20"></i>Destination</span></div></div><div id="map"></div></div>
         <div class="card"><div class="tabs"><button class="tab active" data-lt="rides">Active rides <span class="c" id="cRides">0</span></button><button class="tab" data-lt="drivers">Drivers online <span class="c" id="cDrivers">0</span></button></div><div class="live-list" id="liveList"></div></div></div>`);
-      let L = null, map, layer, data = { rides: [], drivers: [] }, tab = 'rides', paused = false, first = true;
-      try { L = await loadLeaflet(); } catch (e) { setHtml($('#map', ctx.el), html`<div class="empty"><div class="ring">${ico('pin')}</div><h4>Map unavailable</h4><p>${e.message} The lists on the right still update.</p></div>`); }
+      let G = null, map, markers = [], lines = [], info, data = { rides: [], drivers: [] }, tab = 'rides', paused = false, first = true;
+      try { G = await loadGoogleMaps(); } catch (e) { setHtml($('#map', ctx.el), html`<div class="empty"><div class="ring">${ico('pin')}</div><h4>Map unavailable</h4><p>${e.message} The lists on the right still update.</p></div>`); }
       if (!ctx.alive()) return;
-      if (L) { map = L.map('map', { zoomControl: true }).setView([-6.165, 39.2], 11); L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap contributors' }).addTo(map); layer = L.layerGroup().addTo(map); }
-      const dot = (c) => L.divIcon({ className: '', html: `<span style="display:block;width:16px;height:16px;border-radius:50%;background:${c};border:3px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.4)"></span>`, iconSize: [16, 16], iconAnchor: [8, 8] });
-      const popup = (lines) => { const d = document.createElement('div'); lines.forEach((l, i) => { const e = document.createElement(i ? 'div' : 'b'); e.textContent = l; d.append(e); }); return d; };
+      if (G) {
+        map = new G.Map($('#map', ctx.el), { center: { lat: -6.165, lng: 39.2 }, zoom: 11, mapTypeControl: false, streetViewControl: false, fullscreenControl: true, clickableIcons: false });
+        info = new G.InfoWindow();
+      }
+      const dot = (c) => ({ path: G.SymbolPath.CIRCLE, scale: 8, fillColor: c, fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3 });
+      const popup = (lines) => { const d = document.createElement('div'); d.style.color = '#101828'; lines.forEach((l, i) => { const e = document.createElement(i ? 'div' : 'b'); e.textContent = l; d.append(e); }); return d; };
+      const addMarker = (pos, color, title, content) => { const m = new G.Marker({ position: pos, map, icon: dot(color), title }); m.addListener('click', () => { info.setContent(content); info.open({ map, anchor: m }); }); markers.push(m); };
       function draw() {
         $('#cRides').textContent = data.rides.length; $('#cDrivers').textContent = data.drivers.length;
         setHtml($('#liveKpi'), html`${[['Active rides', data.rides.length, 'car', ''], ['Searching for a driver', data.rides.filter((r) => r.status === 'searching').length, 'search', 'amber'], ['Trips in progress', data.rides.filter((r) => r.status === 'started').length, 'activity', 'blue'], ['Drivers online', data.drivers.length, 'radio', 'violet']].map(([l, v, i, c]) => html`<div class="card kpi"><div class="row between"><span class="label">${l}</span><span class="ico ${c}">${ico(i)}</span></div><div class="value">${v}</div></div>`)}`);
-        if (L) {
-          layer.clearLayers(); const b = [];
-          data.drivers.forEach((d) => { const p = [Number(d.lat), Number(d.lng)]; b.push(p); L.marker(p, { icon: dot('#12b76a') }).bindPopup(popup([d.fullName, `${F.title(d.vehicleType || '')} ${d.plateNumber || ''}`, `Updated ${F.ago(d.locationUpdatedAt)}`])).addTo(layer); });
-          data.rides.forEach((r) => { const a = [Number(r.pickupLat), Number(r.pickupLng)], z = [Number(r.destinationLat), Number(r.destinationLng)]; b.push(a);
-            L.marker(a, { icon: dot('#1570ef') }).bindPopup(popup([`${r.rideCode} · ${F.title(r.status)}`, r.pickupAddress, `Rider: ${r.riderName}`])).addTo(layer); L.marker(z, { icon: dot('#d92d20') }).bindPopup(popup([`Destination · ${r.rideCode}`, r.destinationAddress])).addTo(layer);
-            L.polyline([a, z], { color: '#98a2b3', weight: 2, dashArray: '5 6' }).addTo(layer); });
-          if (first && b.length) { map.fitBounds(b, { padding: [40, 40], maxZoom: 14 }); first = false; }
+        if (G && map) {
+          markers.forEach((m) => m.setMap(null)); lines.forEach((l) => l.setMap(null)); markers = []; lines = []; const bounds = new G.LatLngBounds(); let n = 0;
+          const ok = (p) => Number.isFinite(p.lat) && Number.isFinite(p.lng) && !(p.lat === 0 && p.lng === 0);
+          data.drivers.forEach((d) => { const p = { lat: Number(d.lat), lng: Number(d.lng) }; if (!ok(p)) return; bounds.extend(p); n++; addMarker(p, '#12b76a', d.fullName, popup([d.fullName, `${F.title(d.vehicleType || '')} ${d.plateNumber || ''}`, `Updated ${F.ago(d.locationUpdatedAt)}`])); });
+          data.rides.forEach((r) => { const a = { lat: Number(r.pickupLat), lng: Number(r.pickupLng) }, z = { lat: Number(r.destinationLat), lng: Number(r.destinationLng) }; if (!ok(a)) return; bounds.extend(a); n++;
+            addMarker(a, '#1570ef', `${r.rideCode} pickup`, popup([`${r.rideCode} · ${F.title(r.status)}`, r.pickupAddress, `Rider: ${r.riderName}`]));
+            if (ok(z)) { addMarker(z, '#d92d20', `${r.rideCode} destination`, popup([`Destination · ${r.rideCode}`, r.destinationAddress]));
+              lines.push(new G.Polyline({ path: [a, z], map, strokeColor: '#98a2b3', strokeOpacity: 0, strokeWeight: 2, icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.9, scale: 2 }, offset: '0', repeat: '10px' }] })); } });
+          if (first && n) { map.fitBounds(bounds, 48); G.event.addListenerOnce(map, 'idle', () => { if (map.getZoom() > 14) map.setZoom(14); }); first = false; }
         }
         const list = $('#liveList');
         if (tab === 'rides') setHtml(list, data.rides.length ? html`${data.rides.map((r) => html`<button class="live-item" data-ride="${r.id}"><div class="row between"><b class="mono">${r.rideCode}</b>${Z.badge(r.status)}</div><div style="margin-top:4px">${F.trunc(r.pickupAddress, 38)} → ${F.trunc(r.destinationAddress, 38)}</div><div class="muted" style="font-size:12.5px">${r.riderName} · ${r.driverName || 'No driver yet'} · ${F.money(r.estimatedFare)}</div></button>`)}` : Z.empty('No active rides', 'Rides in progress will show here.', 'car'));
@@ -140,7 +154,7 @@
       }
       async function tick() { try { const r = await get('/admin/live-map', { fresh: true }); if (!ctx.alive()) return; data = r; draw(); const s = $('#liveState'); if (s) { s.className = 'badge badge-success'; s.textContent = 'Live · ' + F.time(new Date()); } } catch (e) { const s = $('#liveState'); if (s) { s.className = 'badge badge-danger'; s.textContent = 'Connection lost'; } } }
       await tick(); const iv = setInterval(() => { if (!paused && !document.hidden) tick(); }, 10000);
-      ctx.onLeave(() => { clearInterval(iv); if (map) map.remove(); });
+      ctx.onLeave(() => { clearInterval(iv); markers.forEach((m) => m.setMap(null)); lines.forEach((l) => l.setMap(null)); map = null; });
       ctx.el.addEventListener('click', (e) => {
         const t = e.target.closest('[data-lt]'); if (t) { tab = t.dataset.lt; $$('[data-lt]').forEach((x) => x.classList.toggle('active', x === t)); draw(); }
         const r = e.target.closest('[data-ride]'); if (r) Z.openRide(r.dataset.ride); const d = e.target.closest('[data-drv]'); if (d) location.hash = `#/drivers/${d.dataset.drv}`;

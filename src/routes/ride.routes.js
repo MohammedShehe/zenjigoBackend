@@ -7,5 +7,6 @@ router.get('/:id/cancel-preview',c.cancelPreview);
 router.get('/:id/track',c.track);
 router.get('/:id',c.get);
 router.post('/:id/cancel',c.cancel);
+router.post('/:id/pay',[body('method').optional().isIn(['cash','wallet','momo','bank','card']),body('phone').optional({nullable:true}).isString()],validate,c.pay);
 router.post('/:id/rating',[body('stars').isInt({min:1,max:5})],validate,c.rate);
 module.exports=router;
