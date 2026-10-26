@@ -164,6 +164,11 @@ function sanitizeRiderRide(ride, viewerUserId) {
   if (!ride) return ride;
   const isRider = viewerUserId != null && Number(ride.rider_id) === Number(viewerUserId);
   const isDriver = viewerUserId != null && ride.driver_id != null && Number(ride.driver_id) === Number(viewerUserId);
+  if (isDriver && !isRider) {
+    // The trip PIN is a secret the rider reads out to the driver. The driver must never receive it.
+    const { trip_pin, tripPin, ...rest } = ride;
+    return rest;
+  }
   const est = Number(ride.estimated_fare || 0);
   const disc = Number(ride.discount || 0);
   const debt = Number(ride.cancellation_fee || 0);
@@ -192,11 +197,65 @@ async function notifyAvailableDrivers(rideId,rideType,lat,lng){
  const tokens=drivers.length?await db.query(`SELECT token FROM device_tokens WHERE user_id IN (${drivers.map(()=>'?').join(',')})`,drivers.map(x=>x.user_id)):[]; await sendPush(tokens.map(x=>x.token),{title:'New ride request',body:'A rider nearby is requesting a ride.'},{type:'ride_request',rideId});
 }
 async function getById(id,userId=null){
- const rows=await db.query(`SELECT r.*,ru.full_name rider_name,ru.phone rider_phone,du.full_name driver_name,du.phone driver_phone,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number,d.rating driver_rating,d.total_rides driver_total_rides FROM rides r JOIN users ru ON ru.id=r.rider_id LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN driver_profiles d ON d.user_id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`,[id]);
- if(!rows.length || (userId && rows[0].rider_id!==userId && rows[0].driver_id!==userId)) throw ApiError.notFound('Ride not found');
+ const rows=await db.query(`SELECT r.*,ru.full_name rider_name,ru.phone rider_phone,ru.photo_url rider_photo,du.full_name driver_name,du.phone driver_phone,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number,v.make vehicle_make,v.model vehicle_model,v.color vehicle_color,d.rating driver_rating,d.total_rides driver_total_rides,d.current_lat driver_lat,d.current_lng driver_lng FROM rides r JOIN users ru ON ru.id=r.rider_id LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN driver_profiles d ON d.user_id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`,[id]);
+ if(!rows.length || (userId && Number(rows[0].rider_id)!==Number(userId) && Number(rows[0].driver_id)!==Number(userId))) throw ApiError.notFound('Ride not found');
  const x=rows[0];
  const ride={...x,estimated_fare:Number(x.estimated_fare),final_fare:x.final_fare==null?null:Number(x.final_fare),discount:Number(x.discount),tip:Number(x.tip),total_paid:Number(x.total_paid),cancellation_fee:Number(x.cancellation_fee||0)};
+ await attachLiveState(ride);
  return sanitizeRiderRide(ride, userId);
+}
+
+/**
+ * Adds everything the apps need to render a live trip without extra calls:
+ *  - nested `driver` object (name, phone, photo, vehicle, rating, live lat/lng)
+ *  - `amount_due` and `payment_status` (not_due | pending | awaiting_cash | processing | paid)
+ *  - `reached_destination`
+ *  - driver earnings once the ride is completed
+ * State is derived from ride_events / payment_transactions so no schema change is needed.
+ */
+async function attachLiveState(ride){
+ const events=await db.query(`SELECT event_type,payload,created_at FROM ride_events WHERE ride_id=? AND event_type IN ('reached_destination','rider_cash_selected','payment_confirmed') ORDER BY id ASC`,[ride.id]);
+ const has=(t)=>events.find(e=>e.event_type===t);
+ const reached=!!has('reached_destination');
+ const confirmed=has('payment_confirmed');
+ let paymentStatus='not_due';
+ if(ride.status==='completed' || confirmed) paymentStatus='paid';
+ else if(ride.status==='started' && reached){
+   paymentStatus='pending';
+   if(has('rider_cash_selected')) paymentStatus='awaiting_cash';
+   const tx=await db.query(`SELECT status FROM payment_transactions WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[String(ride.id)]).catch(()=>[]);
+   if(tx.length && tx[0].status==='pending') paymentStatus='processing';
+ }
+ ride.reached_destination=reached;
+ ride.payment_status=paymentStatus;
+ ride.amount_due=Math.max(0,Number(ride.estimated_fare)-Number(ride.discount||0)+Number(ride.cancellation_fee||0)+Number(ride.tip||0));
+ if(ride.driver_id){
+   ride.driver={
+     id:ride.driver_id,
+     fullName:ride.driver_name,
+     name:ride.driver_name,
+     phone:ride.driver_phone,
+     photoUrl:ride.driver_photo,
+     plateNumber:ride.vehicle_number,
+     vehicleType:ride.vehicle_type,
+     vehicleMake:ride.vehicle_make||null,
+     vehicleModel:ride.vehicle_model||null,
+     vehicleColor:ride.vehicle_color||null,
+     rating:ride.driver_rating==null?null:Number(ride.driver_rating),
+     totalRides:Number(ride.driver_total_rides||0),
+     lat:ride.driver_lat==null?null:Number(ride.driver_lat),
+     lng:ride.driver_lng==null?null:Number(ride.driver_lng)
+   };
+ }
+ if(ride.status==='completed' && ride.driver_id){
+   const led=await db.query('SELECT gross_amount,commission_amount,driver_amount FROM driver_earning_ledger WHERE ride_id=? AND driver_id=? LIMIT 1',[ride.id,ride.driver_id]).catch(()=>[]);
+   if(led.length){
+     ride.driver_earnings=Number(led[0].driver_amount);
+     ride.platform_commission=Number(led[0].commission_amount);
+     ride.gross_amount=Number(led[0].gross_amount);
+   }
+ }
+ return ride;
 }
 async function listForUser(userId,role,limit=30){
  const col=role==='driver'?'r.driver_id':'r.rider_id';
@@ -241,78 +300,207 @@ async function accept(driverId,rideId){
   }
  });
 }
-async function setStatus(driverId,rideId,status){
+const STATUS_TITLES = {
+  arriving: 'Driver is on the way',
+  arrived: 'Driver has arrived',
+  started: 'Trip started',
+  completed: 'Ride completed',
+  cancelled: 'Ride cancelled'
+};
+const STATUS_BODIES = {
+  arriving: 'Your driver is coming to the pickup point.',
+  arrived: 'Your driver is at the pickup location. Share your PIN to start the trip.',
+  started: 'Enjoy your ZenjiGO trip.',
+  completed: 'Thanks for riding with ZenjiGO. Rate your trip!',
+  cancelled: 'Your driver cancelled this ride.'
+};
+
+/**
+ * Driver-driven status changes.
+ *  - started   : requires the rider's 4-digit trip PIN (`otp`).
+ *  - completed : only allowed once payment is confirmed (wallet/mobile-money by the system, cash by the driver).
+ *                Normal completion happens automatically through confirmPaymentAndComplete().
+ */
+async function setStatus(driverId,rideId,status,opts={}){
  if(status!=='completed' && status!=='cancelled') await finance.assertUsable(driverId,'continue accepting rides');
- const allowed={arriving:['accepted'],arrived:['arriving'],started:['arrived'],completed:['started'],cancelled:['accepted','arriving','arrived']};
+ const allowed={arriving:['accepted'],arrived:['arriving','accepted'],started:['arrived'],completed:['started'],cancelled:['accepted','arriving','arrived']};
+ if(status==='completed'){
+   const cur=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'payment_confirmed']);
+   if(!cur.length) throw ApiError.conflict('Payment has not been confirmed yet. The ride ends automatically once the rider has paid (or you confirm cash).');
+   return confirmPaymentAndComplete(rideId,{source:'driver_status',driverId});
+ }
  const result=await db.transaction(async conn=>{
   const [rows]=await conn.query('SELECT * FROM rides WHERE id=? AND driver_id=? FOR UPDATE',[rideId,driverId]);
   if(!rows.length) throw ApiError.notFound('Ride not found');
   const r=rows[0];
+  if(r.status===status) return null; // idempotent: already in this state
   if(!allowed[status]?.includes(r.status)) throw ApiError.conflict(`Cannot change ride from ${r.status} to ${status}.`);
-  if(status==='completed' && !r.started_at) throw ApiError.conflict('Ride has not started.');
+  if(status==='started'){
+    const pin=String(opts.otp==null?'':opts.otp).trim();
+    if(!pin) throw ApiError.badRequest('Enter the 4-digit PIN shown on the rider\'s screen to start the ride.');
+    if(pin!==String(r.trip_pin)) throw ApiError.badRequest('Incorrect PIN. Ask the rider to read the PIN from their app.');
+  }
   let sql='UPDATE rides SET status=?'; const vals=[status];
   if(status==='arriving') sql+=',accepted_at=COALESCE(accepted_at,UTC_TIMESTAMP())';
   if(status==='arrived') sql+=',arrived_at=UTC_TIMESTAMP()';
   if(status==='started') sql+=',started_at=UTC_TIMESTAMP()';
-  if(status==='completed') sql+=',completed_at=UTC_TIMESTAMP(),final_fare=GREATEST(0,estimated_fare-discount),total_paid=GREATEST(0,estimated_fare-discount+cancellation_fee+tip)';
   if(status==='cancelled'){sql+=',cancelled_at=UTC_TIMESTAMP(),cancel_reason=?'; vals.push('Cancelled by driver');}
   sql+=' WHERE id=?'; vals.push(rideId);
   await conn.query(sql,vals);
   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,driverId,status]);
-  const rider=r.rider_id;
-  if(status==='completed'){
-    const total=Math.max(0,Number(r.estimated_fare)-Number(r.discount)+Number(r.cancellation_fee||0)+Number(r.tip||0));
-    if(r.payment_method==='wallet'){
-      const [w]=await conn.query('SELECT balance FROM wallets WHERE user_id=? FOR UPDATE',[rider]);
-      if(!w.length || Number(w[0].balance)<total) throw ApiError.badRequest('Rider wallet balance is insufficient.');
-      const before=Number(w[0].balance), after=before-total;
-      await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,rider]);
-      await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[rider,'ride',-total,before,after,'ride',rideId,'wallet','Ride payment']);
-    }
-    await finance.recordRideEarning(conn,driverId,total,rideId);
-    if(Number(r.cancellation_fee||0)>0){
-      await conn.query('UPDATE rider_cancellation_debts SET amount=GREATEST(0,amount-?),updated_at=UTC_TIMESTAMP() WHERE rider_id=?',[Number(r.cancellation_fee),rider]);
-      await conn.query('UPDATE rider_profiles SET cancellation_debt=GREATEST(0,cancellation_debt-?) WHERE user_id=?',[Number(r.cancellation_fee),rider]);
-    }
-    await conn.query('UPDATE rider_profiles SET total_rides=total_rides+1 WHERE user_id=?',[rider]);
-  }
-  const statusTitles = {
-    arriving: 'Driver is on the way',
-    arrived: 'Driver has arrived',
-    started: 'Trip started',
-    completed: 'Ride completed',
-    cancelled: 'Ride cancelled'
-  };
-  const statusBodies = {
-    arriving: 'Your driver is coming to the pickup point.',
-    arrived: 'Your driver is at the pickup location.',
-    started: 'Enjoy your ZenjiGO trip.',
-    completed: 'Thanks for riding with ZenjiGO. Rate your trip!',
-    cancelled: 'Your driver cancelled this ride.'
-  };
-  await pushUser(
-    rider,
-    statusTitles[status] || `Ride ${status}`,
-    statusBodies[status] || `Your ride is now ${status}.`,
-    { type: 'ride_status', rideId: String(rideId), status: String(status) }
-  );
-  // Notify driver on complete
-  if (status === 'completed' && driverId) {
-    await pushUser(
-      driverId,
-      'Trip completed',
-      'Fare recorded. Check Earnings for details.',
-      { type: 'ride_completed', rideId: String(rideId) }
-    );
-  }
-  return getById(rideId,driverId);
+  return r;
  });
- if(status==='completed'){
-   const financeStatus=await finance.getStatus(driverId);
-   if(financeStatus.blocked && financeStatus.autopayEnabled) await finance.tryAutopay(driverId);
+ if(result){
+   await pushUser(result.rider_id, STATUS_TITLES[status]||`Ride ${status}`, STATUS_BODIES[status]||`Your ride is now ${status}.`, { type:'ride_status', rideId:String(rideId), status:String(status) });
  }
- return result;
+ return getById(rideId,driverId);
 }
+
+/** Driver reached the drop-off point: tells both apps to move to the payment step. */
+async function reachedDestination(driverId,rideId){
+ const r=await db.query('SELECT * FROM rides WHERE id=? AND driver_id=?',[rideId,driverId]);
+ if(!r.length) throw ApiError.notFound('Ride not found');
+ const x=r[0];
+ if(x.status!=='started') throw ApiError.conflict('The ride has not started yet.');
+ const done=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'reached_destination']);
+ if(!done.length){
+   await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,driverId,'reached_destination']);
+   const due=Math.max(0,Number(x.estimated_fare)-Number(x.discount||0)+Number(x.cancellation_fee||0)+Number(x.tip||0));
+   await pushUser(x.rider_id,'You have reached your destination',`Please pay TZS ${Math.round(due).toLocaleString()} to finish your trip.`,{type:'ride_payment_due',rideId:String(rideId),status:'started'});
+ }
+ return getById(rideId,driverId);
+}
+
+/**
+ * Single place where a ride becomes `completed`. Called after payment has been confirmed:
+ *  - wallet / mobile-money: by the system (rider pay endpoint or provider webhook)
+ *  - cash: by the driver confirming the cash was received
+ */
+async function confirmPaymentAndComplete(rideId,meta={}){
+ const done=await db.transaction(async conn=>{
+  const [rows]=await conn.query('SELECT * FROM rides WHERE id=? FOR UPDATE',[rideId]);
+  if(!rows.length) throw ApiError.notFound('Ride not found');
+  const r=rows[0];
+  if(r.status==='completed') return {r,already:true};
+  if(r.status!=='started') throw ApiError.conflict(`Cannot complete a ride that is ${r.status}.`);
+  if(!r.driver_id) throw ApiError.conflict('Ride has no driver.');
+  const [ev]=await conn.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'payment_confirmed']);
+  if(!ev.length) {
+    await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[rideId,meta.driverId||null,'payment_confirmed',JSON.stringify({method:meta.method||r.payment_method,source:meta.source||'system'})]);
+  }
+  await conn.query(`UPDATE rides SET status='completed',completed_at=UTC_TIMESTAMP(),final_fare=GREATEST(0,estimated_fare-discount),total_paid=GREATEST(0,estimated_fare-discount+cancellation_fee+tip) WHERE id=?`,[rideId]);
+  await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,r.driver_id,'completed']);
+  const total=Math.max(0,Number(r.estimated_fare)-Number(r.discount)+Number(r.cancellation_fee||0)+Number(r.tip||0));
+  const earning=await finance.recordRideEarning(conn,r.driver_id,total,rideId);
+  if(Number(r.cancellation_fee||0)>0){
+    await conn.query('UPDATE rider_cancellation_debts SET amount=GREATEST(0,amount-?),updated_at=UTC_TIMESTAMP() WHERE rider_id=?',[Number(r.cancellation_fee),r.rider_id]);
+    await conn.query('UPDATE rider_profiles SET cancellation_debt=GREATEST(0,cancellation_debt-?) WHERE user_id=?',[Number(r.cancellation_fee),r.rider_id]);
+  }
+  await conn.query('UPDATE rider_profiles SET total_rides=total_rides+1 WHERE user_id=?',[r.rider_id]);
+  return {r,already:false,earning};
+ });
+ if(!done.already){
+   const {r,earning}=done;
+   await pushUser(r.rider_id,'Payment received','Thank you! Your ride is complete. Rate your trip.',{type:'ride_status',rideId:String(rideId),status:'completed'});
+   const share=earning && earning.driverShare!=null?Math.round(earning.driverShare):null;
+   await pushUser(r.driver_id,'Trip completed',share!=null?`Your share: TZS ${share.toLocaleString()}.`:'Fare recorded. Check Earnings for details.',{type:'ride_completed',rideId:String(rideId)});
+   try{
+     const fs=await finance.getStatus(r.driver_id);
+     if(fs.blocked && fs.autopayEnabled) await finance.tryAutopay(r.driver_id);
+   }catch(e){ console.warn('[ride complete autopay]',e.message); }
+ }
+ return getById(rideId,done.r.driver_id);
+}
+
+/**
+ * Rider pays at the destination.
+ *  - wallet : debited immediately, ride completes automatically.
+ *  - cash   : rider announces cash; ride completes when the driver confirms the cash was received.
+ *  - momo / card / bank : a mobile-money charge is started; the ride completes when the provider confirms it.
+ */
+async function payRide(riderId,rideId,input={}){
+ const rows=await db.query('SELECT * FROM rides WHERE id=? AND rider_id=?',[rideId,riderId]);
+ if(!rows.length) throw ApiError.notFound('Ride not found');
+ const r=rows[0];
+ if(r.status==='completed') return getById(rideId,riderId);
+ if(r.status!=='started') throw ApiError.conflict('This ride is not ready for payment.');
+ const reached=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'reached_destination']);
+ if(!reached.length) throw ApiError.conflict('Payment opens once the driver confirms you have reached the destination.');
+ const paid=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'payment_confirmed']);
+ if(paid.length){ await confirmPaymentAndComplete(rideId,{source:'system'}); return getById(rideId,riderId); }
+
+ const method=['cash','wallet','momo','bank','card'].includes(input.method)?input.method:r.payment_method;
+ if(method!==r.payment_method) await db.query('UPDATE rides SET payment_method=? WHERE id=?',[method,rideId]);
+ const total=Math.max(0,Number(r.estimated_fare)-Number(r.discount)+Number(r.cancellation_fee||0)+Number(r.tip||0));
+
+ if(method==='cash'){
+   const sel=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'rider_cash_selected']);
+   if(!sel.length){
+     await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type) VALUES(?,?,?)',[rideId,riderId,'rider_cash_selected']);
+     if(r.driver_id) await pushUser(r.driver_id,'Collect cash',`Collect TZS ${Math.round(total).toLocaleString()} cash from the rider, then confirm to end the ride.`,{type:'ride_collect_cash',rideId:String(rideId)});
+   }
+   return {...(await getById(rideId,riderId)),payment_status:'awaiting_cash'};
+ }
+
+ if(method==='wallet'){
+   const wRows=await db.query('SELECT balance FROM wallets WHERE user_id=?',[riderId]);
+   const w=wRows[0];
+   if(!w || Number(w.balance||0)<total) throw ApiError.badRequest('Your wallet balance is not enough. Top up or choose another way to pay.');
+   await db.transaction(async conn=>{
+     const [wl]=await conn.query('SELECT balance FROM wallets WHERE user_id=? FOR UPDATE',[riderId]);
+     if(!wl.length || Number(wl[0].balance)<total) throw ApiError.badRequest('Your wallet balance is not enough. Top up or choose another way to pay.');
+     const [ev]=await conn.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1 FOR UPDATE',[rideId,'payment_confirmed']);
+     if(ev.length) return;
+     const before=Number(wl[0].balance), after=before-total;
+     await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,riderId]);
+     await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[riderId,'ride',-total,before,after,'ride',rideId,'wallet','Ride payment']);
+     await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[rideId,riderId,'payment_confirmed',JSON.stringify({method:'wallet',source:'system',amount:total})]);
+   });
+   await confirmPaymentAndComplete(rideId,{source:'system',method:'wallet'});
+   return getById(rideId,riderId);
+ }
+
+ // Mobile money (momo / card / bank) → provider charge, confirmed by webhook.
+ const existing=await db.query(`SELECT id,status FROM payment_transactions WHERE user_id=? AND status='pending' AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[riderId,String(rideId)]);
+ if(existing.length) return {...(await getById(rideId,riderId)),payment_status:'processing'};
+ let phone=input.phone||null;
+ if(!phone){ const u=await db.query('SELECT phone FROM users WHERE id=?',[riderId]); phone=u[0]?.phone||null; }
+ if(!phone) throw ApiError.badRequest('A mobile-money phone number is required.');
+ const paymentService=require('./payment.service');
+ await paymentService.initiateRidePayment({userId:riderId,rideId,amount:total,phone});
+ return {...(await getById(rideId,riderId)),payment_status:'processing'};
+}
+
+/** Driver confirms the rider handed over the cash. Completes the ride. */
+async function collectCash(driverId,rideId){
+ const rows=await db.query('SELECT * FROM rides WHERE id=? AND driver_id=?',[rideId,driverId]);
+ if(!rows.length) throw ApiError.notFound('Ride not found');
+ const r=rows[0];
+ if(r.status==='completed') return getById(rideId,driverId);
+ if(r.status!=='started') throw ApiError.conflict('The ride has not started yet.');
+ const reached=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'reached_destination']);
+ if(!reached.length) throw ApiError.conflict('Confirm that you have reached the destination first.');
+ if(r.payment_method!=='cash'){
+   const sel=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'rider_cash_selected']);
+   if(!sel.length) throw ApiError.conflict('The rider chose to pay in-app. The ride ends automatically once the payment is verified.');
+ }
+ return confirmPaymentAndComplete(rideId,{source:'driver_cash',method:'cash',driverId});
+}
+
+/** Called by the payment webhook when a ride-payment charge succeeds. */
+async function confirmRidePaymentFromProvider(rideId,riderId,info={}){
+ const rows=await db.query('SELECT * FROM rides WHERE id=?',[rideId]);
+ if(!rows.length) return null;
+ const r=rows[0];
+ if(r.status==='completed') return r;
+ if(r.status!=='started') return r;
+ const paid=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'payment_confirmed']);
+ if(!paid.length){
+   await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[rideId,riderId||null,'payment_confirmed',JSON.stringify({method:r.payment_method,source:'provider_webhook',reference:info.reference||null,amount:info.amount||null})]);
+ }
+ return confirmPaymentAndComplete(rideId,{source:'provider_webhook'});
+}
+
 /**
  * Live rider-cancellation policy from app_settings (admin-editable).
  * Single key: rider_cancellation { nearPickupKm, percent }
@@ -539,6 +727,11 @@ module.exports = {
   listForUser,
   accept,
   setStatus,
+  reachedDestination,
+  payRide,
+  collectCash,
+  confirmPaymentAndComplete,
+  confirmRidePaymentFromProvider,
   cancelRider,
   cancelPreview,
   nearbyDrivers,

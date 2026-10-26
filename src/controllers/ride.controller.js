@@ -4,6 +4,10 @@ exports.create=asyncHandler(async(req,res)=>ok(res,await service.create(req.user
 exports.list=asyncHandler(async(req,res)=>ok(res,await service.listForUser(req.user.sub,req.user.role,req.query.limit)));
 exports.get=asyncHandler(async(req,res)=>ok(res,await service.getById(req.params.id,req.user.sub)));
 exports.cancel=asyncHandler(async(req,res)=>ok(res,await service.cancelRider(req.user.sub,req.params.id,req.body.reason),'Ride cancelled'));
+exports.pay=asyncHandler(async(req,res)=>{
+ if(req.user.role!=='rider') throw ApiError.forbidden('Only the rider can pay for a ride.');
+ ok(res,await service.payRide(req.user.sub,req.params.id,{method:req.body.method,phone:req.body.phone}),'Payment processed');
+});
 exports.cancelPreview=asyncHandler(async(req,res)=>ok(res,await service.cancelPreview(req.user.sub,req.params.id)));
 exports.nearbyDrivers=asyncHandler(async(req,res)=>{
   const lat = req.query.lat, lng = req.query.lng, radius = req.query.radius || req.query.radiusKm || 5;
@@ -13,5 +17,6 @@ exports.rate=asyncHandler(async(req,res)=>ok(res,await service.rate(req.user.sub
 exports.track=asyncHandler(async(req,res)=>{
  const r=await service.getById(req.params.id,req.user.sub); if(!r.driver_id)return ok(res,{ride:r,location:null});
  const rows=await db.query('SELECT lat,lng,heading,speed,recorded_at FROM driver_locations WHERE driver_id=? AND (ride_id=? OR ride_id IS NULL) ORDER BY id DESC LIMIT 1',[r.driver_id,req.params.id]);
- ok(res,{ride:r,location:rows[0]||null});
+ const loc=rows[0]||null;
+ ok(res,{ride:r,location:loc,driverLat:loc?Number(loc.lat):null,driverLng:loc?Number(loc.lng):null,heading:loc&&loc.heading!=null?Number(loc.heading):null,speed:loc&&loc.speed!=null?Number(loc.speed):null,recordedAt:loc?loc.recorded_at:null});
 });

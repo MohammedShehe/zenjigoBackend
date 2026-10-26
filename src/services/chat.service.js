@@ -90,6 +90,7 @@ async function list(userId) {
        (SELECT m.text FROM messages m WHERE m.conversation_id=c.id AND m.is_deleted=0 ORDER BY m.id DESC LIMIT 1) AS lastMessage,
        (SELECT m.created_at FROM messages m WHERE m.conversation_id=c.id ORDER BY m.id DESC LIMIT 1) AS lastMessageAt,
        (SELECT m.sender_id FROM messages m WHERE m.conversation_id=c.id ORDER BY m.id DESC LIMIT 1) AS lastSenderId,
+       (SELECT m.id FROM messages m WHERE m.conversation_id=c.id AND m.is_deleted=0 ORDER BY m.id DESC LIMIT 1) AS lastMessageId,
        (
          SELECT COUNT(*) FROM messages m
          WHERE m.conversation_id = c.id
@@ -113,7 +114,7 @@ async function list(userId) {
       row.peerRole = 'admin';
     } else if (row.type === 'ride' && row.rideId) {
       const peers = await db.query(
-        `SELECT u.id, u.full_name, u.role FROM conversation_members cm
+        `SELECT u.id, u.full_name, u.role, u.photo_url FROM conversation_members cm
          JOIN users u ON u.id = cm.user_id
          WHERE cm.conversation_id = ? AND cm.user_id <> ? LIMIT 1`,
         [row.id, userId]
@@ -122,8 +123,10 @@ async function list(userId) {
         row.peerName = peers[0].full_name;
         row.peerRole = peers[0].role;
         row.peerId = peers[0].id;
+        row.peerPhotoUrl = peers[0].photo_url || null;
       }
-      row.title = row.title || (row.peerName ? `Chat with ${row.peerName}` : 'Ride chat');
+      // Always show the other person's name, not the generic "Ride chat" stored at creation time.
+      row.title = row.peerName || row.title || 'Ride chat';
     }
   }
   return rows;
