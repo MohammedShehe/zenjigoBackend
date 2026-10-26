@@ -219,6 +219,8 @@ app.use('/admin', (req, res, next) => {
       "frame-ancestors 'none'"
     ].join('; ')
   );
+  // OpenStreetMap's tile servers reject requests with no Referer (helmet's default is no-referrer).
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Cache-Control', 'no-cache');
   next();
 });

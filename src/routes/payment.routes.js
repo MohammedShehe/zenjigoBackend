@@ -6,8 +6,11 @@ const {
   failPayment,
   normalizeWebhookPayload,
   findPaymentFromWebhook,
-  findSettlementFromWebhook
+  findSettlementFromWebhook,
+  markPaymentSuccess,
+  paymentChannel
 } = require('../services/payment.service');
+const rideService = require('../services/ride.service');
 const finance = require('../services/driver_finance.service');
 
 /**
@@ -90,6 +93,22 @@ router.post('/webhook', async (req, res) => {
     if (event.failed) {
       await failPayment(payment.id, event.rawStatus || 'failed');
       return res.json({ success: true, data: { paymentId: payment.id, status: 'failed' } });
+    }
+
+    // Ride fare payments must never be credited to the wallet — they complete the ride instead.
+    const ch = paymentChannel(payment);
+    if (ch.channel === 'ride_payment' && ch.rideId) {
+      if (event.success) {
+        if (event.amount != null && Number.isFinite(Number(event.amount)) && Number(event.amount) + 0.009 < Number(payment.amount)) {
+          return res.json({ success: true, data: { paymentId: payment.id, status: 'underpaid' } });
+        }
+        const done = await markPaymentSuccess(payment.id, event.externalReference);
+        await rideService.confirmRidePaymentFromProvider(Number(ch.rideId), payment.user_id, {
+          reference: event.externalReference, amount: event.amount
+        });
+        return res.json({ success: true, data: { paymentId: done.id, status: 'success' } });
+      }
+      return res.json({ success: true, data: { paymentId: payment.id, status: payment.status } });
     }
 
     if (event.success) {

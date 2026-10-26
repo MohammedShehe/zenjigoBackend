@@ -9,6 +9,7 @@ router.post('/ride/:rideId', c.ride);
 router.get('/:id/messages', c.messages);
 router.post('/:id/messages', [body('text').isLength({ min: 1, max: 5000 })], validate, c.send);
 router.post('/:id/read', c.markRead);
+router.patch('/:id/messages/:messageId', [body('text').isLength({ min: 1, max: 5000 })], validate, c.edit);
 router.delete('/:id/messages/:messageId', c.delete);
 
 module.exports = router;
