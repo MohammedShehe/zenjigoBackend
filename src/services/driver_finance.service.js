@@ -464,13 +464,26 @@ async function settleNow(driverId, paymentMethodId = null, auto = false) {
 /**
  * Admin recorded an off-platform payment (cash / bank). Requires commission to be owed.
  * Refuses while a mobile-money charge is still awaiting confirmation unless `force` is true.
+ * Timed-out processing charges are auto-expired first (same policy as initiateSettlementPayment).
  */
 async function adminSettle(driverId, adminId, { reference = null, note = null, force = false } = {}) {
+  // Auto-expire stale processing charges so cash settlements are not blocked by dead prompts.
+  await db.query(
+    `UPDATE driver_settlements
+        SET status='failed', failure_reason='expired_no_confirmation'
+      WHERE driver_id=? AND status='processing'
+        AND COALESCE(updated_at,created_at) < (UTC_TIMESTAMP() - INTERVAL ? MINUTE)`,
+    [driverId, PROCESSING_TIMEOUT_MIN]
+  );
+
   const s = await getStatus(driverId);
   if (s.commissionOwed <= 0) throw ApiError.badRequest('This driver has no outstanding commission to settle.');
   if (s.activeSettlement && s.activeSettlement.status === 'processing' && !force) {
     throw ApiError.conflict('A mobile-money payment is still awaiting confirmation for this driver. Wait for it, or retry with force=true.');
   }
+  // When force=true we intentionally mark the (reused) settlement paid via admin path.
+  // createSettlement reuses any remaining pending/processing row, so confirmSettlementPaid
+  // correctly closes the mobile-money charge that the admin is overriding with cash.
   const settlement = await createSettlement(driverId, 'admin_manual', { adminId, note: note || null });
   const ref = reference || `ADMIN-${adminId}-${settlement.id}-${Date.now()}`;
   const r = await confirmSettlementPaid(settlement.id, { externalReference: ref, confirmedBy: `admin:${adminId}` });
