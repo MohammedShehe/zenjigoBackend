@@ -142,7 +142,7 @@ async function recordRideEarning(conn, driverId, grossFare, rideId) {
 /**
  * Near-pickup cancellation compensation for the driver.
  * Platform fronts 100% of the fee (0% commission). Recovered from the rider
- * on their next ride via cash / wallet / PayGrid collect.
+ * on their next ride via cash / wallet / Snippe collect.
  */
 async function recordCancellationCredit(conn, driverId, feeAmount, rideId) {
   const amount = Math.max(0, Math.round(Number(feeAmount || 0)));
@@ -218,7 +218,7 @@ async function getOwnSettlement(driverId, settlementId) {
  * Create (or reuse) the pending settlement for the commission currently owed.
  * Creating a record does NOT mean any money was received.
  */
-async function createSettlement(driverId, provider = 'paygrid', metadata = {}, conn = null) {
+async function createSettlement(driverId, provider = 'snippe', metadata = {}, conn = null) {
   return withTx(conn, async (c) => {
     const f = await state(driverId, c, true);
     const owed = Number(f.commission_owed || 0);
@@ -411,7 +411,7 @@ async function initiateSettlementPayment(driverId, opts = {}) {
   const chargePhone = await resolvePhone(driverId, method, phone);
   if (!chargePhone) throw ApiError.badRequest('A mobile-money phone number is required to settle.');
 
-  const settlement = await createSettlement(driverId, 'paygrid', { auto: Boolean(auto), paymentMethodId: method ? method.id : null });
+  const settlement = await createSettlement(driverId, 'snippe', { auto: Boolean(auto), paymentMethodId: method ? method.id : null });
   if (settlement.status === 'already_settled') return { status: 'already_settled', commission: await getStatus(driverId) };
   if (settlement.status === 'processing') {
     // A charge is already awaiting confirmation: never charge the driver twice.
@@ -426,7 +426,7 @@ async function initiateSettlementPayment(driverId, opts = {}) {
   const reference = `ZENJIGO-COM-${driverId}-${settlement.id}-${Date.now()}`;
   // Mark processing + store our reference BEFORE calling the provider, so a fast webhook can find it.
   await db.query(
-    `UPDATE driver_settlements SET status='processing',external_reference=?,payment_method_id=?,provider='paygrid' WHERE id=? AND status='pending'`,
+    `UPDATE driver_settlements SET status='processing',external_reference=?,payment_method_id=?,provider='snippe' WHERE id=? AND status='pending'`,
     [reference, method ? method.id : null, settlement.id]
   );
 

@@ -66,16 +66,15 @@ module.exports = {
     rateWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
     rateMax: Number(process.env.RATE_LIMIT_MAX || 300)
   },
-  // PayGrid payment provider (replaces generic example)
+  // Snippe payment provider
   payment: {
-    provider: process.env.PAYMENT_PROVIDER || 'paygrid',
-    baseUrl: process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || 'https://meet.briq.tz',
-    apiKey: process.env.PAYGRID_API_KEY || process.env.PAYMENT_API_KEY || '',
-    secretKey: process.env.PAYGRID_SECRET_KEY || '',
-    merchantId: process.env.PAYGRID_MERCHANT_ID || process.env.PAYMENT_MERCHANT_ID || '',
-    webhookSecret: process.env.PAYGRID_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '',
-    // Optional: public key for client-side / hosted checkout
-    publicKey: process.env.PAYGRID_PUBLIC_KEY || ''
+    provider: process.env.PAYMENT_PROVIDER || 'snippe',
+    baseUrl: process.env.SNIPPE_BASE_URL || process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || 'https://api.snippe.sh',
+    apiKey: process.env.SNIPPE_API_KEY || process.env.PAYGRID_API_KEY || process.env.PAYMENT_API_KEY || '',
+    secretKey: process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_SECRET_KEY || '',
+    merchantId: process.env.PAYMENT_MERCHANT_ID || '',
+    webhookSecret: process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '',
+    publicKey: process.env.SNIPPE_PUBLIC_KEY || process.env.PAYGRID_PUBLIC_KEY || ''
   },
   ride: {
     currency: process.env.CURRENCY || 'TZS',

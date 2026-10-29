@@ -30,8 +30,8 @@ exports.transactions = asyncHandler(async (req, res) => {
 /**
  * POST /rider/wallet/topup
  * Body: { amount, phone, currency? }
- * Initiates PayGrid mobile-money collect and returns pending paymentId.
- * Wallet is credited only after the PayGrid webhook confirms success.
+ * Initiates Snippe mobile-money collect and returns pending paymentId.
+ * Wallet is credited only after the Snippe webhook confirms success.
  */
 exports.topup = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);

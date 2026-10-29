@@ -618,7 +618,7 @@ async function cancelRider(riderId, rideId, reason) {
       );
 
       // Driver compensation: platform fronts 100% of fee (0% commission).
-      // Recovered from rider on next ride (cash / wallet / PayGrid collect).
+      // Recovered from rider on next ride (cash / wallet / Snippe collect).
       if (x.driver_id) {
         await finance.recordCancellationCredit(conn, x.driver_id, fee, rideId);
       }

@@ -1,6 +1,6 @@
 /**
- * Payment service — wallet top-ups & PayGrid webhooks
- * Docs: https://paydocs.briq.tz/
+ * Payment service — wallet top-ups & Snippe webhooks
+ * Docs: https://docs.snippe.sh/
  */
 const crypto = require('crypto');
 const db = require('../config/db');
@@ -10,14 +10,14 @@ const provider = require('./payment.provider');
 const finance = require('./driver_finance.service');
 
 function getWebhookSecret() {
-  return config.payment.webhookSecret || process.env.PAYGRID_WEBHOOK_SECRET || '';
+  return config.payment.webhookSecret || process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || '';
 }
 
-function verifySignature(rawBody, signature) {
-  return provider.verifyWebhook(rawBody, signature);
+function verifySignature(rawBody, signature, timestamp) {
+  return provider.verifyWebhook(rawBody, signature, timestamp);
 }
 
-async function completeWalletTopup(paymentId, externalReference, providerName = 'paygrid', confirmedAmount = null) {
+async function completeWalletTopup(paymentId, externalReference, providerName = 'snippe', confirmedAmount = null) {
   return db.transaction(async (conn) => {
     const [rows] = await conn.query(
       'SELECT * FROM payment_transactions WHERE id = ? FOR UPDATE',
@@ -60,7 +60,7 @@ async function completeWalletTopup(paymentId, externalReference, providerName = 
       `INSERT INTO wallet_transactions
          (user_id, type, amount, balance_before, balance_after, reference_type, reference_id, payment_method, description, status)
        VALUES (?, 'topup', ?, ?, ?, 'payment', ?, ?, 'Wallet top-up', 'success')`,
-      [p.user_id, p.amount, before, after, p.id, providerName || 'paygrid']
+      [p.user_id, p.amount, before, after, p.id, providerName || 'snippe']
     );
     return { ...p, status: 'success' };
   });
@@ -90,7 +90,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       userId,
       amt,
       currency || config.ride.currency || 'TZS',
-      'paygrid',
+      'snippe',
       reference,
       JSON.stringify({ phone, requestedBy: userId, channel: 'wallet_topup' })
     ]
@@ -98,7 +98,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
   const paymentId = insert.insertId;
 
   try {
-    // Load user profile for customer object required by PayGrid
+    // Load user profile for customer object required by Snippe
     let cust = customer;
     if (!cust) {
       const users = await db.query(
@@ -146,7 +146,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
 }
 
 /**
- * Official PayGrid webhook payload:
+ * Official Snippe webhook payload (also accepts legacy PayGrid shape):
  * { event: "payment.completed", event_id, transaction_id, merchant_reference,
  *   data: { amount, currency, status, ... }, metadata, timestamp }
  * Callback: { type: "transaction.callback", transaction_id, merchant_reference, status, ... }
@@ -169,29 +169,30 @@ function normalizeWebhookPayload(body) {
     ['failed', 'cancelled', 'canceled', 'expired', 'declined'].includes(statusRaw);
 
   const externalReference =
+    data.reference ||
     b.transaction_id ||
     data.transaction_id ||
     b.merchant_reference ||
-    data.reference ||
     b.reference ||
     null;
 
   const merchantRef = b.merchant_reference || data.merchant_reference || null;
   const paymentIdMeta = (b.metadata && b.metadata.paymentId) || (data.metadata && data.metadata.paymentId) || null;
+  const orderIdMeta = (b.metadata && b.metadata.order_id) || (data.metadata && data.metadata.order_id) || null;
   const settlementIdMeta = (b.metadata && b.metadata.settlementId) || (data.metadata && data.metadata.settlementId) || null;
 
   return {
     success,
     failed,
     externalReference: externalReference != null ? String(externalReference) : null,
-    merchantReference: merchantRef != null ? String(merchantRef) : null,
+    merchantReference: merchantRef != null ? String(merchantRef) : (orderIdMeta != null ? String(orderIdMeta) : null),
     paymentId: paymentIdMeta != null && !Number.isNaN(Number(paymentIdMeta)) ? Number(paymentIdMeta) : null,
     settlementId: settlementIdMeta != null && !Number.isNaN(Number(settlementIdMeta)) ? Number(settlementIdMeta) : null,
     amount: data.amount != null ? Number(data.amount) : b.amount != null ? Number(b.amount) : null,
     currency: data.currency || b.currency || null,
     rawStatus: statusRaw,
     eventId: b.event_id || null,
-    provider: 'paygrid'
+    provider: 'snippe'
   };
 }
 
@@ -228,7 +229,7 @@ async function initiateRidePayment({ userId, rideId, amount, phone, currency }) 
   const reference = `ZENJIGO-RIDE-${rideId}-${Date.now()}`;
   const insert = await db.query(
     `INSERT INTO payment_transactions (user_id, amount, currency, provider, status, external_reference, metadata)
-     VALUES (?, ?, ?, 'paygrid', 'pending', ?, ?)`,
+     VALUES (?, ?, ?, 'snippe', 'pending', ?, ?)`,
     [userId, amt, currency || config.ride.currency || 'TZS', reference,
       JSON.stringify({ phone, requestedBy: userId, channel: 'ride_payment', rideId: String(rideId) })]
   );
