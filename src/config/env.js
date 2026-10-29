@@ -64,17 +64,17 @@ module.exports = {
     otpMaxAttempts: Number(process.env.OTP_MAX_ATTEMPTS || 5),
     maxUploadMb: Number(process.env.MAX_UPLOAD_MB || 10),
     rateWindowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
-    rateMax: Number(process.env.RATE_LIMIT_MAX || 300)
+    rateMax: Number(process.env.RATE_LIMIT_MAX || 3000)
   },
   // Snippe payment provider
   payment: {
     provider: process.env.PAYMENT_PROVIDER || 'snippe',
-    baseUrl: process.env.SNIPPE_BASE_URL || process.env.PAYGRID_API_BASE_URL || process.env.PAYMENT_API_BASE_URL || 'https://api.snippe.sh',
-    apiKey: process.env.SNIPPE_API_KEY || process.env.PAYGRID_API_KEY || process.env.PAYMENT_API_KEY || '',
-    secretKey: process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_SECRET_KEY || '',
+    baseUrl: process.env.SNIPPE_BASE_URL || 'https://api.snippe.sh',
+    apiKey: process.env.SNIPPE_API_KEY || '',
+    secretKey: process.env.SNIPPE_WEBHOOK_SECRET || '',
     merchantId: process.env.PAYMENT_MERCHANT_ID || '',
-    webhookSecret: process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '',
-    publicKey: process.env.SNIPPE_PUBLIC_KEY || process.env.PAYGRID_PUBLIC_KEY || ''
+    webhookSecret: process.env.SNIPPE_WEBHOOK_SECRET || '',
+    publicKey: process.env.SNIPPE_PUBLIC_KEY || ''
   },
   ride: {
     currency: process.env.CURRENCY || 'TZS',

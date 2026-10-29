@@ -38,6 +38,27 @@ async function startDailyReminders() {
       }
     });
     console.log('[cron] driver document expiry reminders scheduled (08:00 UTC)');
+
+    // Every minute: expire ride requests nobody accepted, so riders are never stuck "searching".
+    let expiring = false;
+    cron.schedule('* * * * *', async () => {
+      if (expiring) return;
+      expiring = true;
+      try {
+        const n = await require('./services/ride.service').expireStaleSearching();
+        if (n) console.log(`[cron] expired ${n} unmatched ride request(s)`);
+      } catch (e) {
+        console.warn('[cron] ride expiry failed', e.message);
+      } finally { expiring = false; }
+    });
+    // Every night: trim raw GPS breadcrumbs older than 3 days (table grows very fast with live tracking).
+    cron.schedule('30 2 * * *', async () => {
+      try {
+        const r = await db.query('DELETE FROM driver_locations WHERE recorded_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 3 DAY) LIMIT 50000');
+        console.log(`[cron] pruned ${r.affectedRows || 0} old location rows`);
+      } catch (e) { console.warn('[cron] location prune failed', e.message); }
+    });
+    console.log('[cron] stale ride expiry (every minute) + location pruning (02:30 UTC) scheduled');
   } catch (e) {
     console.warn('[cron] node-cron not available', e.message);
   }
@@ -73,8 +94,8 @@ async function runDocumentExpiryReminders() {
       transporter = nodemailer.createTransport({
         host: config.smtp.host,
         port: config.smtp.port || 587,
-        secure: !!config.smtp.secure,
-        auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined
+        secure: Number(config.smtp.port) === 465,
+        auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.password } : undefined
       });
     }
   } catch (_) {}
@@ -135,11 +156,19 @@ async function start() {
   startDailyReminders();
 }
 
+let shuttingDown = false;
 async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`${signal}: shutting down`);
-  await db.pool.end();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 10000).unref();
+  // Hard stop if something hangs.
+  setTimeout(() => process.exit(1), 15000).unref();
+  // 1) stop accepting new sockets/requests, 2) let in-flight work finish, 3) close the DB last.
+  try { io.close(); } catch (_) {}
+  server.close(async () => {
+    try { await db.pool.end(); } catch (_) {}
+    process.exit(0);
+  });
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

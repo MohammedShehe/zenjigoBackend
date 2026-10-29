@@ -10,7 +10,7 @@ const provider = require('./payment.provider');
 const finance = require('./driver_finance.service');
 
 function getWebhookSecret() {
-  return config.payment.webhookSecret || process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || '';
+  return config.payment.webhookSecret || process.env.SNIPPE_WEBHOOK_SECRET || '';
 }
 
 function verifySignature(rawBody, signature, timestamp) {
@@ -176,7 +176,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
 }
 
 /**
- * Official Snippe webhook payload (also accepts legacy PayGrid shape):
+ * Official Snippe webhook payload:
  * { event: "payment.completed", event_id, transaction_id, merchant_reference,
  *   data: { amount, currency, status, ... }, metadata, timestamp }
  * Callback: { type: "transaction.callback", transaction_id, merchant_reference, status, ... }

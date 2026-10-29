@@ -155,19 +155,36 @@ function _km(a, b, c, d) {
 const _livePushAt = new Map();
 const LIVE_PUSH_INTERVAL_MS = Number(process.env.LIVE_TRACK_PUSH_INTERVAL_MS || 120000); // 2 min
 
+const _histAt = new Map(); // driverId -> last breadcrumb timestamp (ms)
+const HISTORY_INTERVAL_MS = Number(process.env.LOCATION_HISTORY_INTERVAL_MS || 10000);
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [k, t] of _histAt) if (t < cutoff) _histAt.delete(k);
+  for (const [k, t] of _livePushAt) if (t < cutoff) _livePushAt.delete(k);
+}, 5 * 60 * 1000).unref();
+
 async function location(id, b) {
-  const lat = Number(b.lat);
-  const lng = Number(b.lng);
+  const lat = Number(b && b.lat);
+  const lng = Number(b && b.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    throw ApiError.badRequest('Invalid location.');
+  }
   const r = await db.query(
     'UPDATE driver_profiles SET current_lat=?,current_lng=?,location_updated_at=UTC_TIMESTAMP() WHERE user_id=?',
     [lat, lng, id]
   );
   if (!r.affectedRows) throw ApiError.notFound('Driver not found');
   const rideId = b.rideId || null;
-  await db.query(
-    'INSERT INTO driver_locations(driver_id,ride_id,lat,lng,heading,speed) VALUES(?,?,?,?,?,?)',
-    [id, rideId, lat, lng, b.heading ?? null, b.speed ?? null]
-  );
+  // Breadcrumb history is throttled: the live position above is always fresh, but writing a row on every
+  // GPS tick from every driver would flood the database.
+  const nowMs = Date.now();
+  if (nowMs - (_histAt.get(id) || 0) >= HISTORY_INTERVAL_MS) {
+    _histAt.set(id, nowMs);
+    await db.query(
+      'INSERT INTO driver_locations(driver_id,ride_id,lat,lng,heading,speed) VALUES(?,?,?,?,?,?)',
+      [id, rideId, lat, lng, b.heading ?? null, b.speed ?? null]
+    );
+  }
 
   // Live tracking push to rider while on an active trip (works with app in background via FCM)
   try {

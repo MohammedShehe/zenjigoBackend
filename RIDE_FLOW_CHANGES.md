@@ -13,7 +13,7 @@ New / changed endpoints
 - POST  /rider/rides/:id/pay  { method: cash|wallet|momo|card|bank, phone? }
     wallet -> debited, ride completes automatically
     cash   -> rider announces cash; driver confirms with collect-cash
-    momo/card/bank -> PayGrid mobile-money charge; ride completes when the webhook confirms it
+    momo/card/bank -> Snippe mobile-money charge; ride completes when the webhook confirms it
 - Ride payload (GET /rider/rides/:id, /driver/rides/:id) now includes: driver{...,lat,lng}, payment_status,
   reached_destination, amount_due, and driver_earnings / platform_commission once completed.
 - GET /rider/rides/:id/track also returns driverLat, driverLng, heading, speed.

@@ -16,7 +16,12 @@ exports.nearbyDrivers=asyncHandler(async(req,res)=>{
 exports.rate=asyncHandler(async(req,res)=>ok(res,await service.rate(req.user.sub,req.params.id,req.body.stars,req.body.feedback,req.body.tip),'Ride rated'));
 exports.track=asyncHandler(async(req,res)=>{
  const r=await service.getById(req.params.id,req.user.sub); if(!r.driver_id)return ok(res,{ride:r,location:null});
+ // Live position comes from the driver's profile row (updated on every GPS tick);
+ // the breadcrumb table is throttled and only supplies heading/speed.
  const rows=await db.query('SELECT lat,lng,heading,speed,recorded_at FROM driver_locations WHERE driver_id=? AND (ride_id=? OR ride_id IS NULL) ORDER BY id DESC LIMIT 1',[r.driver_id,req.params.id]);
- const loc=rows[0]||null;
- ok(res,{ride:r,location:loc,driverLat:loc?Number(loc.lat):null,driverLng:loc?Number(loc.lng):null,heading:loc&&loc.heading!=null?Number(loc.heading):null,speed:loc&&loc.speed!=null?Number(loc.speed):null,recordedAt:loc?loc.recorded_at:null});
+ const crumb=rows[0]||null;
+ const liveLat=r.driver_lat!=null?Number(r.driver_lat):(crumb?Number(crumb.lat):null);
+ const liveLng=r.driver_lng!=null?Number(r.driver_lng):(crumb?Number(crumb.lng):null);
+ const loc=(liveLat!=null&&liveLng!=null)?{lat:liveLat,lng:liveLng,heading:crumb?crumb.heading:null,speed:crumb?crumb.speed:null,recorded_at:crumb?crumb.recorded_at:null}:null;
+ ok(res,{ride:r,location:loc,driverLat:liveLat,driverLng:liveLng,heading:crumb&&crumb.heading!=null?Number(crumb.heading):null,speed:crumb&&crumb.speed!=null?Number(crumb.speed):null,recordedAt:crumb?crumb.recorded_at:null});
 });

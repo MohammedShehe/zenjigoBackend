@@ -4,6 +4,7 @@ const db = require('../config/db');
 const driver = require('../services/driver.service');
 const chat = require('../services/chat.service');
 const config = require('../config/env');
+const realtime = require('../utils/realtime');
 
 function init(http) {
   const io = new Server(http, {
@@ -12,6 +13,7 @@ function init(http) {
   });
 
   chat.setIo(io);
+  realtime.setIo(io);
 
   io.use((socket, next) => {
     try {

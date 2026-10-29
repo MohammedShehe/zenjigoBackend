@@ -28,19 +28,17 @@ router.post('/webhook', async (req, res) => {
 
     const sig =
       req.get('x-webhook-signature') ||
-      req.get('X-Webhook-Signature') ||
-      req.get('x-meetpay-signature') ||
-      req.get('X-MeetPay-Signature') ||
-      req.get('x-paygrid-signature') ||
-      req.get('x-signature') ||
       '';
     const ts =
       req.get('x-webhook-timestamp') ||
       req.get('X-Webhook-Timestamp') ||
       '';
 
-    const secret = process.env.SNIPPE_WEBHOOK_SECRET || process.env.PAYGRID_WEBHOOK_SECRET || '';
+    const secret = process.env.SNIPPE_WEBHOOK_SECRET || '';
+    // Unsigned webhooks are only ever accepted when explicitly enabled for local development.
+    // Never rely on NODE_ENV alone: a mis-set NODE_ENV would let anyone forge "payment received".
     const skipSig =
+      process.env.ALLOW_UNSIGNED_WEBHOOKS === 'true' &&
       process.env.NODE_ENV !== 'production' &&
       (!secret || String(secret).includes('CHANGE_ME'));
 

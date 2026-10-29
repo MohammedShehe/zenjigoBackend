@@ -38,6 +38,8 @@ const config=require('../config/env');
         try{
           await conn.query(statement);
         }catch(error){
+          // Re-running an index/column migration on a DB that already has it is harmless.
+          if(error&&(error.errno===1061||error.errno===1060)){ console.log(`  (already present, skipped) ${statement.slice(0,70)}...`); continue; }
           /*
            * CREATE TABLE/INDEX and ADD COLUMN migrations are written to be
            * idempotent. We do not silently swallow arbitrary SQL errors:

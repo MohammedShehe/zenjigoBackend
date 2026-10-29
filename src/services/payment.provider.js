@@ -17,7 +17,7 @@ function isConfigured() {
   const p = config.payment;
   const key = p.apiKey || '';
   return (
-    (p.provider === 'snippe' || p.provider === 'paygrid' || !p.provider) &&
+    (p.provider === 'snippe' || !p.provider) &&
     !!key &&
     !String(key).includes('CHANGE_ME')
   );
@@ -27,17 +27,8 @@ function baseUrl() {
   const u = String(
     config.payment.baseUrl ||
       process.env.SNIPPE_BASE_URL ||
-      process.env.PAYGRID_API_BASE_URL ||
-      process.env.PAYMENT_API_BASE_URL ||
       DEFAULT_BASE
   ).replace(/\/$/, '');
-  if (
-    u.includes('paygrid.example') ||
-    u.includes('api.paygrid.example') ||
-    u.includes('meet.briq.tz')
-  ) {
-    return DEFAULT_BASE;
-  }
   return u;
 }
 
@@ -89,8 +80,6 @@ async function initiateCollect({
   const webhookUrl =
     process.env.SNIPPE_WEBHOOK_URL ||
     process.env.SNIPPE_CALLBACK_URL ||
-    process.env.PAYGRID_CALLBACK_URL ||
-    process.env.PAYGRID_WEBHOOK_URL ||
     undefined;
 
   const body = {
@@ -183,8 +172,6 @@ async function createCardPayment({
   const webhookUrl =
     process.env.SNIPPE_WEBHOOK_URL ||
     process.env.SNIPPE_CALLBACK_URL ||
-    process.env.PAYGRID_CALLBACK_URL ||
-    process.env.PAYGRID_WEBHOOK_URL ||
     undefined;
 
   const frontend =
@@ -302,13 +289,12 @@ async function chargeDriverCommission({
 /**
  * Verify Snippe webhook signature.
  * X-Webhook-Signature = hex(HMAC-SHA256(signing_key, "{timestamp}.{raw_body}"))
- * Also accepts legacy PayGrid format (raw body only, optional sha256= prefix) for transition.
+ * X-Webhook-Timestamp is mandatory (5 minute replay window).
  */
 function verifyWebhook(rawBody, signatureHeader, timestampHeader) {
   const secret =
     config.payment.webhookSecret ||
     process.env.SNIPPE_WEBHOOK_SECRET ||
-    process.env.PAYGRID_WEBHOOK_SECRET ||
     '';
   if (!secret || String(secret).includes('CHANGE_ME')) return false;
 
@@ -316,26 +302,18 @@ function verifyWebhook(rawBody, signatureHeader, timestampHeader) {
     const raw = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody || '');
     let sig = String(signatureHeader || '').trim();
     if (sig.toLowerCase().startsWith('sha256=')) sig = sig.slice(7);
-    if (!sig) return false;
+    if (!sig || !timestampHeader) return false;
 
-    // Preferred: Snippe "{timestamp}.{body}"
-    if (timestampHeader) {
-      const eventTime = parseInt(timestampHeader, 10);
-      const now = Math.floor(Date.now() / 1000);
-      if (Number.isFinite(eventTime) && Math.abs(now - eventTime) > 300) {
-        return false; // replay window 5 minutes
-      }
-      const message = `${timestampHeader}.${raw}`;
-      const expected = crypto.createHmac('sha256', secret).update(message).digest('hex');
-      if (expected.length === sig.length && crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(sig, 'utf8'))) {
-        return true;
-      }
-    }
+    const eventTime = parseInt(timestampHeader, 10);
+    const now = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(eventTime) || Math.abs(now - eventTime) > 300) return false;
 
-    // Fallback: HMAC of raw body only (older providers)
-    const expectedRaw = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-    if (expectedRaw.length !== sig.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(expectedRaw, 'utf8'), Buffer.from(sig, 'utf8'));
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(`${timestampHeader}.${raw}`)
+      .digest('hex');
+    if (expected.length !== sig.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(sig, 'utf8'));
   } catch {
     return false;
   }

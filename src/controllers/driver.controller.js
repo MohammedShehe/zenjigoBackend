@@ -13,7 +13,14 @@ exports.earnings=asyncHandler(async(req,res)=>ok(res,await s.earnings(req.user.s
 exports.payout=asyncHandler(async(req,res)=>ok(res,await s.payout(req.user.sub,req.body),'Payout requested',201));
 exports.requests=asyncHandler(async(req,res)=>{
  const f=await finance.getStatus(req.user.sub);
- const rows=await db.query(`SELECT r.id,r.ride_code,r.ride_type,r.pickup_address,r.destination_address,r.pickup_lat,r.pickup_lng,r.destination_lat,r.destination_lng,r.estimated_fare,r.estimated_distance_km,r.estimated_duration_min,r.created_at FROM rides r WHERE r.status='searching' AND r.ride_type IN (SELECT type FROM vehicles WHERE driver_id=? AND status='active') ORDER BY r.created_at DESC LIMIT 30`,[req.user.sub]);
+ const me=await db.query('SELECT current_lat,current_lng FROM driver_profiles WHERE user_id=?',[req.user.sub]);
+ const radiusKm=Number(process.env.DISPATCH_RADIUS_KM||8);
+ const hasPos=me.length&&me[0].current_lat!=null&&me[0].current_lng!=null;
+ const deg=radiusKm/111;
+ const params=[req.user.sub];
+ let geo='';
+ if(hasPos){ geo=' AND r.pickup_lat BETWEEN ? AND ? AND r.pickup_lng BETWEEN ? AND ?'; const la=Number(me[0].current_lat),ln=Number(me[0].current_lng); params.push(la-deg,la+deg,ln-deg,ln+deg); }
+ const rows=await db.query(`SELECT r.id,r.ride_code,r.ride_type,r.pickup_address,r.destination_address,r.pickup_lat,r.pickup_lng,r.destination_lat,r.destination_lng,r.estimated_fare,r.estimated_distance_km,r.estimated_duration_min,r.created_at FROM rides r WHERE r.status='searching' AND r.created_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 10 MINUTE) AND r.ride_type IN (SELECT type FROM vehicles WHERE driver_id=? AND status='active')${geo} ORDER BY r.created_at DESC LIMIT 30`,params);
  if(f.blocked || f.grossSinceSettlement>=finance.THRESHOLD){
    return ok(res,{restricted:true,settlementRequired:true,commissionOwed:f.commissionOwed,threshold:finance.THRESHOLD,requests:rows.map(r=>({id:r.id,ride_code:r.ride_code,ride_type:r.ride_type,pickup_lat:r.pickup_lat,pickup_lng:r.pickup_lng,estimated_distance_km:r.estimated_distance_km,created_at:r.created_at,masked:true}))});
  }
