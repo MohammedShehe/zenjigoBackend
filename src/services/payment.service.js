@@ -76,10 +76,14 @@ async function failPayment(paymentId, reason) {
   );
 }
 
-async function initiateTopup({ userId, amount, phone, currency, customer, network }) {
+async function initiateTopup({ userId, amount, phone, currency, customer, network, paymentMethod, callbackUrl }) {
   const amt = Number(amount);
   if (!amt || amt < 500) throw ApiError.badRequest('Minimum top-up amount is 500 TZS.');
-  if (!phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
+
+  const method = String(paymentMethod || 'momo').toLowerCase();
+  const isCard = method === 'card' || method === 'bank' || method === 'bank_card';
+
+  if (!isCard && !phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
 
   const reference = `ZENJIGO-TOPUP-${userId}-${Date.now()}`;
   const insert = await db.query(
@@ -92,13 +96,17 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       currency || config.ride.currency || 'TZS',
       'snippe',
       reference,
-      JSON.stringify({ phone, requestedBy: userId, channel: 'wallet_topup' })
+      JSON.stringify({
+        phone: phone || null,
+        requestedBy: userId,
+        channel: isCard ? 'wallet_topup_card' : 'wallet_topup',
+        paymentMethod: method
+      })
     ]
   );
   const paymentId = insert.insertId;
 
   try {
-    // Load user profile for customer object required by Snippe
     let cust = customer;
     if (!cust) {
       const users = await db.query(
@@ -112,18 +120,34 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
         lastname: parts.slice(1).join(' ') || 'User',
         email: u.email || `user${userId}@zenjigo.online`
       };
+      if (!phone && u.phone) phone = u.phone;
     }
 
-    const result = await provider.initiateCollect({
-      amount: amt,
-      currency: currency || config.ride.currency || 'TZS',
-      userId,
-      phone,
-      reference,
-      customer: cust,
-      network,
-      metadata: { paymentId }
-    });
+    let result;
+    if (isCard) {
+      result = await provider.createCardPayment({
+        amount: amt,
+        currency: currency || config.ride.currency || 'TZS',
+        userId,
+        phone,
+        reference,
+        customer: cust,
+        callbackUrl,
+        channel: 'wallet_topup_card',
+        metadata: { paymentId, paymentMethod: method }
+      });
+    } else {
+      result = await provider.initiateCollect({
+        amount: amt,
+        currency: currency || config.ride.currency || 'TZS',
+        userId,
+        phone,
+        reference,
+        customer: cust,
+        network,
+        metadata: { paymentId }
+      });
+    }
 
     if (result.externalReference && result.externalReference !== reference) {
       await db.query(
@@ -137,7 +161,13 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       status: result.status || 'pending',
       externalReference: result.externalReference || reference,
       provider: result.provider,
-      message: 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
+      paymentUrl: result.paymentUrl || null,
+      paymentMethod: method,
+      message: isCard
+        ? (result.paymentUrl
+            ? 'Redirect to complete card payment. Wallet credits after confirmation.'
+            : 'Card payment initiated. Complete checkout to credit your wallet.')
+        : 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
     };
   } catch (err) {
     await failPayment(paymentId, err.message);

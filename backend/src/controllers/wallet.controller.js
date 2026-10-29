@@ -29,21 +29,24 @@ exports.transactions = asyncHandler(async (req, res) => {
 
 /**
  * POST /rider/wallet/topup
- * Body: { amount, phone, currency? }
- * Initiates Snippe mobile-money collect and returns pending paymentId.
+ * Body: { amount, phone?, currency?, paymentMethod?: 'momo'|'card'|'bank', callbackUrl? }
+ * - Mobile money: Snippe USSD push (phone required)
+ * - Card / bank: Snippe hosted card checkout (returns paymentUrl)
  * Wallet is credited only after the Snippe webhook confirms success.
  */
 exports.topup = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) throw ApiError.badRequest('Amount must be greater than zero.');
 
-  // Prefer explicit phone; fall back to authenticated user's phone from DB
+  const paymentMethod = String(req.body.paymentMethod || req.body.method || 'momo').toLowerCase();
+  const isCard = paymentMethod === 'card' || paymentMethod === 'bank' || paymentMethod === 'bank_card';
+
   let phone = req.body.phone || req.body.msisdn || null;
   if (!phone) {
     const users = await db.query('SELECT phone FROM users WHERE id = ? LIMIT 1', [req.user.sub]);
     phone = users[0]?.phone || null;
   }
-  if (!phone) {
+  if (!isCard && !phone) {
     throw ApiError.badRequest(
       'Phone number is required for mobile money top-up. Pass "phone" in the body or ensure your profile has a phone number.'
     );
@@ -53,16 +56,14 @@ exports.topup = asyncHandler(async (req, res) => {
     userId: req.user.sub,
     amount,
     phone,
-    currency: req.body.currency || config.ride.currency || 'TZS'
+    currency: req.body.currency || config.ride.currency || 'TZS',
+    paymentMethod,
+    callbackUrl: req.body.callbackUrl || null
   });
 
   ok(res, result, result.message || 'Top-up initiated', 201);
 });
 
-/**
- * GET /rider/wallet/topup/:id
- * Poll status of a top-up payment.
- */
 exports.topupStatus = asyncHandler(async (req, res) => {
   const rows = await db.query(
     `SELECT id, amount, currency, provider, status, external_reference AS externalReference, created_at AS createdAt

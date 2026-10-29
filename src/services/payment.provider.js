@@ -153,6 +153,112 @@ async function initiateCollect({
 }
 
 /**
+ * Create a card payment – returns payment_url for hosted checkout redirect.
+ * Official: POST /v1/payments  payment_type: card
+ */
+async function createCardPayment({
+  amount,
+  currency,
+  userId,
+  phone,
+  reference,
+  customer,
+  callbackUrl,
+  metadata,
+  channel
+}) {
+  if (!isConfigured()) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Payment provider is not configured.');
+    }
+    return {
+      provider: 'snippe-dev',
+      externalReference: reference || `ZENJIGO-CARD-${userId}-${Date.now()}`,
+      status: 'pending',
+      paymentUrl: null
+    };
+  }
+
+  const idem = String(reference || `ZENJIGO-CARD-${userId}-${Date.now()}`).slice(0, 30);
+  const webhookUrl =
+    process.env.SNIPPE_WEBHOOK_URL ||
+    process.env.SNIPPE_CALLBACK_URL ||
+    process.env.PAYGRID_CALLBACK_URL ||
+    process.env.PAYGRID_WEBHOOK_URL ||
+    undefined;
+
+  const frontend =
+    process.env.FRONTEND_URL ||
+    process.env.RIDER_WEB_URL ||
+    process.env.APP_URL ||
+    'https://zenjigo.online';
+
+  const body = {
+    payment_type: 'card',
+    details: {
+      amount: Math.round(Number(amount)),
+      currency: currency || 'TZS'
+    },
+    phone_number: normalizeTzPhone(phone || '255700000000'),
+    customer: {
+      firstname: customer?.firstname || customer?.firstName || 'ZenjiGO',
+      lastname: customer?.lastname || customer?.lastName || 'User',
+      email: customer?.email || `user${userId}@zenjigo.online`,
+      address: customer?.address || 'Dar es Salaam',
+      city: customer?.city || 'Dar es Salaam',
+      state: customer?.state || 'DSM',
+      postcode: customer?.postcode || '11101',
+      country: 'TZ'
+    },
+    callback_url:
+      callbackUrl ||
+      `${String(frontend).replace(/\/$/, '')}/rider/wallet.html?topup=1&ref=${encodeURIComponent(reference || idem)}`,
+    metadata: {
+      ...(metadata || {}),
+      order_id: reference || idem,
+      userId: String(userId),
+      channel: channel || 'wallet_topup_card'
+    }
+  };
+  if (webhookUrl) body.webhook_url = webhookUrl;
+
+  const res = await fetch(`${baseUrl()}/v1/payments`, {
+    method: 'POST',
+    headers: authHeaders(idem),
+    body: JSON.stringify(body)
+  });
+
+  const data = await res.json().catch(() => ({}));
+  const payload = data.data || data;
+  const ok =
+    res.ok &&
+    data.status !== 'error' &&
+    data.error_code == null &&
+    (payload.status === 'pending' ||
+      payload.status === 'processing' ||
+      payload.status === 'completed' ||
+      res.status === 200 ||
+      res.status === 201);
+
+  if (!ok) {
+    const msg =
+      data.message ||
+      data.error_code ||
+      payload.message ||
+      `Snippe card payment failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return {
+    provider: 'snippe',
+    externalReference: payload.reference || payload.id || idem,
+    status: payload.status || 'pending',
+    paymentUrl: payload.payment_url || payload.checkout_url || payload.url || null,
+    raw: payload
+  };
+}
+
+/**
  * Charge saved method / commission — uses same create payment API (mobile).
  */
 async function chargeDriverCommission({
@@ -238,6 +344,7 @@ function verifyWebhook(rawBody, signatureHeader, timestampHeader) {
 module.exports = {
   chargeDriverCommission,
   initiateCollect,
+  createCardPayment,
   verifyWebhook,
   isConfigured,
   baseUrl
