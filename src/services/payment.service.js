@@ -76,7 +76,18 @@ async function failPayment(paymentId, reason) {
   );
 }
 
-async function initiateTopup({ userId, amount, phone, currency, customer, network, paymentMethod, callbackUrl }) {
+/** Keep only non-sensitive card facts (never PAN / CVV / full expiry). */
+function sanitizeCardInfo(card) {
+  if (!card || typeof card !== 'object') return null;
+  const last4 = String(card.last4 || card.cardLast4 || '').replace(/\D/g, '').slice(-4);
+  const brand = String(card.brand || card.cardBrand || '').replace(/[^a-z ]/gi, '').slice(0, 20);
+  const holder = String(card.holder || card.holderName || card.cardHolder || '')
+    .replace(/[^\p{L}\p{N} .'-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (!last4 && !brand && !holder) return null;
+  return { last4: last4 || null, brand: brand || null, holder: holder || null };
+}
+
+async function initiateTopup({ userId, amount, phone, currency, customer, network, paymentMethod, callbackUrl, cancelUrl, card }) {
   const amt = Number(amount);
   if (!amt || amt < 500) throw ApiError.badRequest('Minimum top-up amount is 500 TZS.');
 
@@ -85,6 +96,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
 
   if (!isCard && !phone) throw ApiError.badRequest('Phone number is required for mobile money top-up.');
 
+  const cardInfo = isCard ? sanitizeCardInfo(card) : null;
   const reference = `ZENJIGO-TOPUP-${userId}-${Date.now()}`;
   const insert = await db.query(
     `INSERT INTO payment_transactions
@@ -100,7 +112,8 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
         phone: phone || null,
         requestedBy: userId,
         channel: isCard ? 'wallet_topup_card' : 'wallet_topup',
-        paymentMethod: method
+        paymentMethod: method,
+        card: cardInfo
       })
     ]
   );
@@ -121,6 +134,12 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
         email: u.email || `user${userId}@zenjigo.online`
       };
       if (!phone && u.phone) phone = u.phone;
+      // Billing name on the hosted card checkout follows the name on the card the rider typed.
+      if (isCard && cardInfo?.holder) {
+        const hp = cardInfo.holder.split(/\s+/);
+        cust.firstname = hp[0] || cust.firstname;
+        cust.lastname = hp.slice(1).join(' ') || cust.lastname;
+      }
     }
 
     let result;
@@ -133,6 +152,7 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
         reference,
         customer: cust,
         callbackUrl,
+        cancelCallbackUrl: cancelUrl,
         channel: 'wallet_topup_card',
         metadata: { paymentId, paymentMethod: method }
       });
@@ -163,9 +183,11 @@ async function initiateTopup({ userId, amount, phone, currency, customer, networ
       provider: result.provider,
       paymentUrl: result.paymentUrl || null,
       paymentMethod: method,
+      amount: amt,
+      card: cardInfo,
       message: isCard
         ? (result.paymentUrl
-            ? 'Redirect to complete card payment. Wallet credits after confirmation.'
+            ? 'Authorise the card payment on the secure checkout. Your wallet is credited once the bank confirms it.'
             : 'Card payment initiated. Complete checkout to credit your wallet.')
         : 'Confirm the payment prompt on your phone. Your wallet updates when payment completes.'
     };
@@ -298,6 +320,17 @@ async function markPaymentSuccess(paymentId, externalReference) {
   return rows[0];
 }
 
+async function cancelPendingTopup(userId, paymentId) {
+  const r = await db.query(
+    `UPDATE payment_transactions
+     SET status = 'failed',
+         metadata = JSON_SET(COALESCE(metadata, '{}'), '$.failReason', 'cancelled_by_rider')
+     WHERE id = ? AND user_id = ? AND status = 'pending'`,
+    [paymentId, userId]
+  );
+  return (r.affectedRows || 0) > 0;
+}
+
 function paymentChannel(row) {
   try {
     const m = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
@@ -306,6 +339,7 @@ function paymentChannel(row) {
 }
 
 module.exports = {
+  cancelPendingTopup,
   initiateRidePayment,
   markPaymentSuccess,
   paymentChannel,

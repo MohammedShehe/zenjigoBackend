@@ -43,6 +43,11 @@ function authHeaders(idempotencyKey) {
   return headers;
 }
 
+function httpsOnly(u) {
+  const v = String(u || '').trim();
+  return /^https:\/\//i.test(v) ? v : null;
+}
+
 function normalizeTzPhone(phone) {
   let d = String(phone || '').replace(/\D/g, '');
   if (d.startsWith('0') && d.length === 10) d = '255' + d.slice(1);
@@ -153,6 +158,7 @@ async function createCardPayment({
   reference,
   customer,
   callbackUrl,
+  cancelCallbackUrl,
   metadata,
   channel
 }) {
@@ -174,17 +180,26 @@ async function createCardPayment({
     process.env.SNIPPE_CALLBACK_URL ||
     undefined;
 
-  const frontend =
+  const frontend = String(
     process.env.FRONTEND_URL ||
-    process.env.RIDER_WEB_URL ||
-    process.env.APP_URL ||
-    'https://zenjigo.online';
+      process.env.RIDER_WEB_URL ||
+      process.env.APP_URL ||
+      'https://zenjigo.online'
+  ).replace(/\/$/, '');
+
+  // Snippe hosted card checkout needs HTTPS redirect + cancel URLs (<= 500 chars) inside `details`.
+  // The success/cancel landing page is the rider web wallet, which polls the payment status.
+  const ref = encodeURIComponent(reference || idem);
+  const redirectUrl = httpsOnly(callbackUrl) || `${frontend}/rider/wallet.html?topup=1&ref=${ref}`;
+  const cancelUrl = httpsOnly(cancelCallbackUrl) || `${frontend}/rider/wallet.html?topup=cancelled&ref=${ref}`;
 
   const body = {
     payment_type: 'card',
     details: {
       amount: Math.round(Number(amount)),
-      currency: currency || 'TZS'
+      currency: currency || 'TZS',
+      redirect_url: redirectUrl.slice(0, 500),
+      cancel_url: cancelUrl.slice(0, 500)
     },
     phone_number: normalizeTzPhone(phone || '255700000000'),
     customer: {
@@ -197,9 +212,8 @@ async function createCardPayment({
       postcode: customer?.postcode || '11101',
       country: 'TZ'
     },
-    callback_url:
-      callbackUrl ||
-      `${String(frontend).replace(/\/$/, '')}/rider/wallet.html?topup=1&ref=${encodeURIComponent(reference || idem)}`,
+    // Kept for API-version compatibility (older Snippe SDKs use callback_url).
+    callback_url: redirectUrl.slice(0, 500),
     metadata: {
       ...(metadata || {}),
       order_id: reference || idem,

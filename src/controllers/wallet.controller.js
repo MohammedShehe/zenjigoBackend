@@ -38,6 +38,13 @@ exports.topup = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!amount || amount <= 0) throw ApiError.badRequest('Amount must be greater than zero.');
 
+  // Raw card data must never reach our servers (PCI-DSS). Card numbers are authorised on the
+  // provider's hosted checkout; we only accept non-sensitive display facts (brand / last4 / holder).
+  const RAW_CARD_KEYS = ['cardNumber', 'card_number', 'pan', 'number', 'cvv', 'cvc', 'securityCode', 'expiry', 'expiryDate'];
+  if (RAW_CARD_KEYS.some((k) => req.body[k] != null) || (req.body.card && RAW_CARD_KEYS.some((k) => req.body.card[k] != null))) {
+    throw ApiError.badRequest('Do not send full card details to this API. Card numbers are entered on the secure checkout only.');
+  }
+
   const paymentMethod = String(req.body.paymentMethod || req.body.method || 'momo').toLowerCase();
   const isCard = paymentMethod === 'card' || paymentMethod === 'bank' || paymentMethod === 'bank_card';
 
@@ -58,7 +65,9 @@ exports.topup = asyncHandler(async (req, res) => {
     phone,
     currency: req.body.currency || config.ride.currency || 'TZS',
     paymentMethod,
-    callbackUrl: req.body.callbackUrl || null
+    callbackUrl: req.body.callbackUrl || null,
+    cancelUrl: req.body.cancelUrl || null,
+    card: isCard ? req.body.card || null : null
   });
 
   ok(res, result, result.message || 'Top-up initiated', 201);
@@ -74,6 +83,11 @@ exports.topupStatus = asyncHandler(async (req, res) => {
   );
   if (!rows.length) throw ApiError.notFound('Payment not found.');
   ok(res, rows[0]);
+});
+
+exports.topupCancel = asyncHandler(async (req, res) => {
+  const done = await paymentService.cancelPendingTopup(req.user.sub, req.params.id);
+  ok(res, { cancelled: done }, done ? 'Top-up cancelled' : 'Nothing to cancel');
 });
 
 exports.charge = asyncHandler(async (req, res) => {
