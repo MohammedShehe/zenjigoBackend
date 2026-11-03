@@ -3,6 +3,8 @@ const coords=[body('pickupLat').isFloat({min:-90,max:90}),body('pickupLng').isFl
 router.post('/quote',[body('rideType').isIn(['boda','bajaji','taxi']),...coords],validate,c.quote);
 router.post('/',[body('rideType').isIn(['boda','bajaji','taxi']),body('pickupAddress').notEmpty(),body('destinationAddress').notEmpty(),body('paymentMethod').optional().isIn(['cash','wallet','momo','bank','card']),...coords],validate,c.create);
 router.get('/',c.list);
+router.get('/active',c.active);
+router.get('/unrated',c.unrated);
 router.get('/:id/cancel-preview',c.cancelPreview);
 router.get('/:id/track',c.track);
 router.get('/:id',c.get);

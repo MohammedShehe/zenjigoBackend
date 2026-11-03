@@ -140,6 +140,10 @@ async function profile(id){
 }
 async function documents(id){return db.query('SELECT id,document_type,url,resource_type,expires_at,status,rejection_reason,created_at FROM driver_documents WHERE driver_id=? ORDER BY id DESC',[id]);}
 async function setOnline(id,online){
+ if(!online){
+   const busy=await db.query("SELECT id,status FROM rides WHERE driver_id=? AND status IN ('accepted','arriving','arrived','started') LIMIT 1",[id]);
+   if(busy.length) throw ApiError.conflict('You have a ride in progress. Finish it (or hand it back before the trip starts) before going offline.',{code:'DRIVER_ON_RIDE',rideId:Number(busy[0].id),status:busy[0].status});
+ }
  if(online){const d=await db.query(`SELECT application_status FROM driver_profiles WHERE user_id=?`,[id]);if(!d.length||d[0].application_status!=='active')throw ApiError.forbidden('Driver must be approved before going online.');}
  await db.query('UPDATE driver_profiles SET online=? WHERE user_id=?',[online?1:0,id]); return {online:!!online};
 }

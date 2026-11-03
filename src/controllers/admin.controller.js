@@ -8,6 +8,7 @@ const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
 const { notifyUser } = require('../services/notification.service');
 const chatService = require('../services/chat.service');
+const lifecycle = require('../services/ride.lifecycle.service');
 
 function audit(adminId, action, entityType, entityId, meta = null) {
   return db.query(
@@ -55,6 +56,7 @@ exports.dashboard = asyncHandler(async (req, res) => {
   const pendingTours = await safe(() => one(`SELECT COUNT(*) n FROM tour_bookings WHERE status='pending'`), { n: 0 });
   const pendingChangeRequests = await safe(() => one(`SELECT COUNT(*) n FROM driver_change_requests WHERE status='pending'`), { n: 0 });
   const openReports = await safe(() => one(`SELECT COUNT(*) n FROM driver_reports WHERE status='open'`), { n: 0 });
+  const ridesAttention = await safe(() => lifecycle.attentionCount(), 0);
   const blockedDrivers = await safe(() => one(`SELECT COUNT(*) n FROM driver_financials WHERE blocked=1`), { n: 0 });
   const commissionOwed = await safe(() => one(`SELECT COALESCE(SUM(commission_owed),0) n FROM driver_financials`), { n: 0 });
   const expiringDocs = await one(`
@@ -103,6 +105,7 @@ exports.dashboard = asyncHandler(async (req, res) => {
       parcels: pendingParcels.n,
       tourBookings: pendingTours.n,
       reports: openReports.n,
+      ridesAttention,
       supportUnread: unreadSupport,
       expiringDocuments: expiringDocs.n,
       blockedDrivers: blockedDrivers.n
@@ -173,8 +176,10 @@ exports.riderStatus = asyncHandler(async (req, res) => {
   if (!['active', 'suspended', 'pending', 'rejected'].includes(status)) throw ApiError.badRequest('Invalid status');
   const r = await db.query(`UPDATE users SET status=? WHERE id=? AND role='rider'`, [status, req.params.id]);
   if (r.affectedRows === 0) throw ApiError.notFound('Rider not found');
-  await audit(req.user.sub, 'rider_status', 'user', req.params.id, { status });
-  ok(res, null, 'Rider status updated');
+  let released = 0;
+  if (status === 'suspended' || status === 'rejected') released = await lifecycle.releaseUserRides(req.params.id, 'rider', 'Account suspended').catch(() => 0);
+  await audit(req.user.sub, 'rider_status', 'user', req.params.id, { status, releasedRides: released });
+  ok(res, { releasedRides: released }, 'Rider status updated');
 });
 
 exports.deleteRider = asyncHandler(async (req, res) => {
@@ -182,6 +187,7 @@ exports.deleteRider = asyncHandler(async (req, res) => {
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='rider'`, [id]);
   if (!existing.length) throw ApiError.notFound('Rider not found');
   const reason = (req.body && (req.body.reason || req.body.archiveReason)) || 'Archived by admin';
+  await lifecycle.releaseUserRides(id, 'rider', 'Account archived').catch(() => 0);
   const result = await archiveService.archiveUser(id, req.user.sub, reason);
   await audit(req.user.sub, 'archive_rider', 'user', id, { archiveId: result.archiveId, reason });
   ok(res, result, 'Rider archived');
@@ -434,7 +440,9 @@ exports.driverStatus = asyncHandler(async (req, res) => {
     [appStatus, rejectionReason, approvedAt, status, id]
   );
   await db.query(`UPDATE users SET status=? WHERE id=?`, [userStatus, id]);
-  await audit(req.user.sub, 'driver_status', 'user', id, { status, reason: rejectionReason });
+  let releasedRides = 0;
+  if (status === 'rejected' || status === 'suspended') releasedRides = await lifecycle.releaseUserRides(id, 'driver', 'Account suspended').catch(() => 0);
+  await audit(req.user.sub, 'driver_status', 'user', id, { status, reason: rejectionReason, releasedRides });
 
   const msg = status === 'rejected' || status === 'suspended'
     ? `Your application was ${status}. Reason: ${reason}`
@@ -463,6 +471,7 @@ exports.deleteDriver = asyncHandler(async (req, res) => {
   const existing = await db.query(`SELECT id FROM users WHERE id=? AND role='driver'`, [id]);
   if (!existing.length) throw ApiError.notFound('Driver not found');
   const reason = (req.body && (req.body.reason || req.body.archiveReason)) || 'Archived by admin';
+  await lifecycle.releaseUserRides(id, 'driver', 'Account archived').catch(() => 0);
   const result = await archiveService.archiveUser(id, req.user.sub, reason);
   await audit(req.user.sub, 'archive_driver', 'user', id, { archiveId: result.archiveId, reason });
   ok(res, result, 'Driver archived');
@@ -589,6 +598,33 @@ exports.ride = asyncHandler(async (req, res) => {
   if (!rows.length) throw ApiError.notFound('Ride not found');
   const events = await db.query('SELECT * FROM ride_events WHERE ride_id=? ORDER BY id', [req.params.id]);
   ok(res, { ride: rows[0], events });
+});
+
+/* ---- Ride interventions (support tools) ---- */
+exports.ridesAttention = asyncHandler(async (req, res) => ok(res, await lifecycle.listAttention()));
+exports.cancelRide = asyncHandler(async (req, res) => {
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (reason.length < 3) throw ApiError.badRequest('Please give a reason for cancelling this ride.');
+  const out = await lifecycle.adminCancel(req.user.sub, req.params.id, reason);
+  await audit(req.user.sub, 'ride_cancel', 'ride', req.params.id, { reason });
+  ok(res, out, 'Ride cancelled');
+});
+exports.completeRide = asyncHandler(async (req, res) => {
+  const note = String((req.body && req.body.reason) || '').trim();
+  if (note.length < 3) throw ApiError.badRequest('Please note why this ride is being completed manually.');
+  const out = await lifecycle.adminComplete(req.user.sub, req.params.id, { method: req.body && req.body.method, note });
+  await audit(req.user.sub, 'ride_complete', 'ride', req.params.id, { note, method: req.body && req.body.method });
+  ok(res, out, 'Ride completed');
+});
+exports.redispatchRide = asyncHandler(async (req, res) => {
+  const out = await lifecycle.adminRedispatch(req.user.sub, req.params.id);
+  await audit(req.user.sub, 'ride_redispatch', 'ride', req.params.id, {});
+  ok(res, out, out.status === 'searching' ? 'Ride returned to search' : 'Ride cancelled (re-dispatch limit reached)');
+});
+exports.dismissRideFlag = asyncHandler(async (req, res) => {
+  const out = await lifecycle.adminDismissFlag(req.params.id);
+  await audit(req.user.sub, 'ride_flag_dismissed', 'ride', req.params.id, {});
+  ok(res, out, 'Marked as handled');
 });
 
 /* -------------------- Finance -------------------- */

@@ -40,17 +40,20 @@ async function startDailyReminders() {
     console.log('[cron] driver document expiry reminders scheduled (08:00 UTC)');
 
     // Every minute: expire ride requests nobody accepted, so riders are never stuck "searching".
+    // The lifecycle engine also re-dispatches dead drivers, closes abandoned trips and resolves unpaid cash rides.
     let expiring = false;
-    cron.schedule('* * * * *', async () => {
+    const sweep = async () => {
       if (expiring) return;
       expiring = true;
       try {
-        const n = await require('./services/ride.service').expireStaleSearching();
-        if (n) console.log(`[cron] expired ${n} unmatched ride request(s)`);
+        const acts = await require('./services/ride.lifecycle.service').runReaper();
+        if (acts.length) console.log(`[cron] ride lifecycle: ${acts.map((a) => a.rideId ? `#${a.rideId} ${a.action}` : a.action).join(', ')}`);
       } catch (e) {
-        console.warn('[cron] ride expiry failed', e.message);
+        console.warn('[cron] ride lifecycle failed', e.message);
       } finally { expiring = false; }
-    });
+    };
+    cron.schedule('* * * * *', sweep);
+    setTimeout(sweep, 5000).unref(); // clear anything that got stuck while the server was down
     // Every night: trim raw GPS breadcrumbs older than 3 days (table grows very fast with live tracking).
     cron.schedule('30 2 * * *', async () => {
       try {
@@ -150,6 +153,8 @@ async function runDocumentExpiryReminders() {
 
 async function start() {
   await db.health();
+  try { await require('./services/ride.lifecycle.service').ensureLifecycleSchema(); }
+  catch (e) { console.error('[schema] lifecycle columns could not be ensured:', e.message); throw e; }
   server.listen(config.port, () =>
     console.log(`ZenjiGO API listening on http://localhost:${config.port}${config.apiPrefix}`)
   );

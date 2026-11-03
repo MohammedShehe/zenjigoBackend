@@ -6,6 +6,44 @@ const { notifyUser } = require('./notification.service');
 const finance = require('./driver_finance.service');
 const realtime = require('../utils/realtime');
 
+/* ------------------------------------------------------------------ *
+ * Lifecycle rules (all overridable from .env, evaluated at call time)
+ * ------------------------------------------------------------------ */
+const ACTIVE_STATUSES = ['searching', 'accepted', 'arriving', 'arrived', 'started'];
+const envNum = (k, d) => { const v = Number(process.env[k]); return Number.isFinite(v) && v > 0 ? v : d; };
+const LIFE = {
+  searchWindowSec: () => Math.max(60, envNum('RIDE_SEARCH_WINDOW_SECONDS', 180)),
+  driverStaleMin: () => envNum('RIDE_DRIVER_STALE_MINUTES', 10),   // no GPS ping from the assigned driver
+  acceptedMaxMin: () => envNum('RIDE_ACCEPTED_MAX_MINUTES', 45),   // accepted but never arrived
+  noShowMin: () => envNum('RIDE_NOSHOW_MINUTES', 15),              // driver waiting at pickup
+  tripStaleMin: () => envNum('RIDE_TRIP_STALE_MINUTES', 30),       // started trip, driver silent
+  tripMaxHours: () => envNum('RIDE_TRIP_MAX_HOURS', 6),            // absolute cap on a running trip
+  cashAutoMin: () => envNum('RIDE_CASH_AUTOCONFIRM_MINUTES', 30),  // reached, cash, driver never confirmed
+  payOverdueMin: () => envNum('RIDE_PAYMENT_OVERDUE_MINUTES', 60), // reached, unpaid -> flag for admin
+  paymentTtlMin: () => envNum('RIDE_PAYMENT_TTL_MINUTES', 4),      // mobile-money prompt lifetime
+  maxRedispatch: () => envNum('RIDE_MAX_REDISPATCH', 2),
+  maxKm: () => envNum('RIDE_MAX_DISTANCE_KM', 150),
+  minKm: () => Number(process.env.RIDE_MIN_DISTANCE_KM || 0.05)
+};
+const minutesSince = (v) => {
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? (Date.now() - t) / 60000 : null;
+};
+
+/**
+ * Pure assessment of whether a ride is stuck because the driver disappeared.
+ * `x` needs: status, driver_id, driver_online, driver_pinged_at (+ reached flag).
+ */
+function assessStuck(x, reached) {
+  const pingAge = minutesSince(x.driver_pinged_at);
+  const silent = !x.driver_id || !x.driver_online || pingAge == null || pingAge >= LIFE.driverStaleMin();
+  if (x.status === 'started' && !reached && silent) {
+    return { canForceClose: true, reason: 'driver_unreachable', pingAgeMin: pingAge };
+  }
+  return { canForceClose: false, reason: null, pingAgeMin: pingAge };
+}
+
 function haversine(a, b, c, d) {
   const R = 6371;
   const rad = Math.PI / 180;
@@ -163,8 +201,24 @@ async function quote(input) {
 }
 async function create(riderId,input){
  if(!['boda','bajaji','taxi'].includes(input.rideType)) throw ApiError.badRequest('Invalid ride type');
- const active=await db.query("SELECT id FROM rides WHERE rider_id=? AND status IN ('searching','accepted','arriving','arrived','started') LIMIT 1",[riderId]);
- if(active.length) throw ApiError.conflict('You already have a ride in progress. Finish or cancel it before booking another.');
+
+ // Close anything that is provably dead (unanswered searches, vanished drivers, no-shows ...) so a rider is
+ // never blocked by a ride nobody is working on any more.
+ try { await require('./ride.lifecycle.service').healRiderRides(riderId); } catch (e) { console.warn('[ride] heal before booking failed:', e.message); }
+
+ const blockActive = async (connOrNull) => {
+   const rows = connOrNull
+     ? (await connOrNull.query(`SELECT id,ride_code,status FROM rides WHERE rider_id=? AND status IN ('searching','accepted','arriving','arrived','started') ORDER BY id DESC LIMIT 1`,[riderId]))[0]
+     : await db.query(`SELECT id,ride_code,status FROM rides WHERE rider_id=? AND status IN ('searching','accepted','arriving','arrived','started') ORDER BY id DESC LIMIT 1`,[riderId]);
+   if(rows.length) throw ApiError.conflict('You already have a ride in progress. Open it to continue, or cancel it before booking another.',{code:'ACTIVE_RIDE_EXISTS',rideId:Number(rows[0].id),rideCode:rows[0].ride_code,status:rows[0].status});
+ };
+ await blockActive(null);
+
+ // --- trip sanity -------------------------------------------------------------------------------------------
+ const crowKm=haversine(Number(input.pickupLat),Number(input.pickupLng),Number(input.destinationLat),Number(input.destinationLng));
+ if(crowKm<LIFE.minKm()) throw ApiError.badRequest('Your pickup and destination are the same place. Please choose a different destination.');
+ if(crowKm>LIFE.maxKm()) throw ApiError.badRequest(`This trip is too long for a single ride (over ${LIFE.maxKm()} km). Please choose a closer destination.`);
+
  const q=await quote(input);
  const tripPin=Math.floor(1000+Math.random()*9000).toString();
  let discount=0;
@@ -173,23 +227,40 @@ async function create(riderId,input){
  const debtRow=await db.query('SELECT cancellation_debt FROM rider_profiles WHERE user_id=?',[riderId]);
  if(debtRow.length) priorDebt=Math.max(0,Number(debtRow[0].cancellation_debt||0));
  if(input.promoCode){
-   const p=await db.query(`SELECT * FROM promos WHERE code=? AND is_active=1 AND valid_from<=UTC_TIMESTAMP() AND valid_until>=UTC_TIMESTAMP() LIMIT 1`,[input.promoCode.toUpperCase()]);
+   const code=String(input.promoCode).trim().toUpperCase();
+   const p=await db.query(`SELECT * FROM promos WHERE code=? AND is_active=1 AND applies_to IN ('ride','all') AND valid_from<=UTC_TIMESTAMP() AND valid_until>=UTC_TIMESTAMP() LIMIT 1`,[code]);
    if(!p.length) throw ApiError.badRequest('Promo code is invalid or expired.');
-   const used=await db.query('SELECT COUNT(*) n FROM promo_redemptions WHERE promo_id=? AND user_id=?',[p[0].id,riderId]);
-   if(used[0].n>=p[0].per_user_limit) throw ApiError.badRequest('Promo usage limit reached for this rider.');
-   discount=p[0].discount_type==='percent'?q.estimatedFare*Number(p[0].discount_value)/100:Number(p[0].discount_value);
-   if(p[0].max_discount) discount=Math.min(discount,Number(p[0].max_discount));
-   discount=Math.min(discount,q.estimatedFare);
+   const promo=p[0];
+   if(promo.usage_limit!=null && Number(promo.usage_count||0)>=Number(promo.usage_limit)) throw ApiError.badRequest('This promo has reached its usage limit.');
+   // Count redemptions AND live/finished rides carrying the code, so a promo cannot be reused by booking twice quickly.
+   const used=await db.query(`SELECT (SELECT COUNT(*) FROM promo_redemptions WHERE promo_id=? AND user_id=?) a,(SELECT COUNT(*) FROM rides WHERE rider_id=? AND promo_code=? AND status<>'cancelled') b`,[promo.id,riderId,riderId,code]);
+   if(Math.max(Number(used[0].a),Number(used[0].b))>=Number(promo.per_user_limit)) throw ApiError.badRequest('You have already used this promo.');
+   discount=promo.discount_type==='percent'?q.estimatedFare*Number(promo.discount_value)/100:Number(promo.discount_value);
+   if(promo.max_discount) discount=Math.min(discount,Number(promo.max_discount));
+   discount=Math.round(Math.min(discount,q.estimatedFare));
+   input.promoCode=code;
+ }
+ const payMethod=input.paymentMethod||'cash';
+ if(payMethod==='wallet'){
+   const w=await db.query('SELECT balance FROM wallets WHERE user_id=?',[riderId]);
+   const need=Math.max(0,q.estimatedFare-discount)+priorDebt;
+   if(!w.length||Number(w[0].balance||0)<need) throw ApiError.badRequest('Your wallet balance is not enough for this ride. Top up or choose another way to pay.',{code:'WALLET_LOW'});
  }
  // Store pure trip fare + prior debt separately for accounting.
  // Rider-facing APIs present a single total (fare - discount + debt) with no cancel label.
- const r=await db.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,cancellation_fee,payment_method,promo_code,trip_pin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
- [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,priorDebt,input.paymentMethod||'cash',input.promoCode?.toUpperCase()||null,tripPin]);
- await db.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q,priorDebtApplied:priorDebt,silent:true})]);
+ const rideId=await db.transaction(async conn=>{
+   // Serialise concurrent bookings from the same rider (double taps, two devices).
+   await conn.query('SELECT id FROM users WHERE id=? FOR UPDATE',[riderId]);
+   await blockActive(conn);
+   const [r]=await conn.query(`INSERT INTO rides(ride_code,rider_id,ride_type,pickup_address,pickup_lat,pickup_lng,destination_address,destination_lat,destination_lng,estimated_distance_km,estimated_duration_min,estimated_fare,discount,cancellation_fee,payment_method,promo_code,trip_pin,searching_since) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())`,
+    [code(),riderId,input.rideType,input.pickupAddress,input.pickupLat,input.pickupLng,input.destinationAddress,input.destinationLat,input.destinationLng,q.distanceKm,q.durationMin,q.estimatedFare,discount,priorDebt,payMethod,input.promoCode||null,tripPin]);
+   await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)',[r.insertId,riderId,'requested',JSON.stringify({quote:q,priorDebtApplied:priorDebt,silent:true})]);
+   return r.insertId;
+ });
  // NOTE: the debt is only cleared when the ride that carries it is completed (see confirmPaymentAndComplete),
  // so an unmatched/cancelled request never silently wipes what the rider owes.
- await notifyAvailableDrivers(r.insertId,input.rideType,input.pickupLat,input.pickupLng);
- return sanitizeRiderRide(await getById(r.insertId,riderId), riderId);
+ try { await notifyAvailableDrivers(rideId,input.rideType,input.pickupLat,input.pickupLng); } catch (e) { console.warn('[ride] dispatch notify failed:', e.message); }
+ return sanitizeRiderRide(await getById(rideId,riderId), riderId);
 }
 
 /** Hide cancel-debt breakdown from riders; present one total fare. */
@@ -225,12 +296,14 @@ function sanitizeRiderRide(ride, viewerUserId) {
   return ride;
 }
 
-async function notifyAvailableDrivers(rideId,rideType,lat,lng){
+async function notifyAvailableDrivers(rideId,rideType,lat,lng,excludeIds=[]){
  const radiusKm=Number(process.env.DISPATCH_RADIUS_KM||8);
  const deg=radiusKm/111;
  const plat=Number(lat), plng=Number(lng);
  const rows=await db.query(`SELECT d.user_id,d.current_lat,d.current_lng FROM driver_profiles d JOIN users u ON u.id=d.user_id AND u.status='active' JOIN vehicles v ON v.driver_id=d.user_id AND v.status='active' AND v.type=? WHERE d.online=1 AND d.application_status='active' AND d.current_lat IS NOT NULL AND d.current_lng IS NOT NULL AND d.location_updated_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL ? SECOND) AND d.current_lat BETWEEN ? AND ? AND d.current_lng BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM rides ar WHERE ar.driver_id=d.user_id AND ar.status IN ('accepted','arriving','arrived','started')) GROUP BY d.user_id,d.current_lat,d.current_lng`,[rideType,Math.max(30,Number(config.ride.locationStaleSeconds)*3||180),plat-deg,plat+deg,plng-deg,plng+deg]);
- const near=rows.map(x=>({id:x.user_id,km:haversine(plat,plng,Number(x.current_lat),Number(x.current_lng))})).filter(x=>x.km<=radiusKm).sort((a,b)=>a.km-b.km).slice(0,25);
+ const released=await db.query("SELECT DISTINCT actor_id FROM ride_events WHERE ride_id=? AND event_type='driver_released' AND actor_id IS NOT NULL",[rideId]).catch(()=>[]);
+ const skip=new Set([...excludeIds,...released.map(x=>x.actor_id)].map(Number));
+ const near=rows.filter(x=>!skip.has(Number(x.user_id))).map(x=>({id:x.user_id,km:haversine(plat,plng,Number(x.current_lat),Number(x.current_lng))})).filter(x=>x.km<=radiusKm).sort((a,b)=>a.km-b.km).slice(0,25);
  if(!near.length) return 0;
  for(const d of near) realtime.emitToUser(d.id,'ride:new',{rideId:Number(rideId),rideType,distanceKm:Number(d.km.toFixed(2))});
  const ids=near.map(x=>x.id);
@@ -239,7 +312,7 @@ async function notifyAvailableDrivers(rideId,rideType,lat,lng){
  return near.length;
 }
 async function getById(id,userId=null){
- const rows=await db.query(`SELECT r.*,ru.full_name rider_name,ru.phone rider_phone,ru.photo_url rider_photo,du.full_name driver_name,du.phone driver_phone,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number,v.make vehicle_make,v.model vehicle_model,v.color vehicle_color,d.rating driver_rating,d.total_rides driver_total_rides,d.current_lat driver_lat,d.current_lng driver_lng FROM rides r JOIN users ru ON ru.id=r.rider_id LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN driver_profiles d ON d.user_id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`,[id]);
+ const rows=await db.query(`SELECT r.*,ru.full_name rider_name,ru.phone rider_phone,ru.photo_url rider_photo,du.full_name driver_name,du.phone driver_phone,du.photo_url driver_photo,v.type vehicle_type,v.plate_number vehicle_number,v.make vehicle_make,v.model vehicle_model,v.color vehicle_color,d.rating driver_rating,d.total_rides driver_total_rides,d.current_lat driver_lat,d.current_lng driver_lng,d.location_updated_at driver_pinged_at,d.online driver_online FROM rides r JOIN users ru ON ru.id=r.rider_id LEFT JOIN users du ON du.id=r.driver_id LEFT JOIN driver_profiles d ON d.user_id=r.driver_id LEFT JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`,[id]);
  if(!rows.length || (userId && Number(rows[0].rider_id)!==Number(userId) && Number(rows[0].driver_id)!==Number(userId))) throw ApiError.notFound('Ride not found');
  const x=rows[0];
  const ride={...x,estimated_fare:Number(x.estimated_fare),final_fare:x.final_fare==null?null:Number(x.final_fare),discount:Number(x.discount),tip:Number(x.tip),total_paid:Number(x.total_paid),cancellation_fee:Number(x.cancellation_fee||0)};
@@ -265,11 +338,15 @@ async function attachLiveState(ride){
  else if(ride.status==='started' && reached){
    paymentStatus='pending';
    if(has('rider_cash_selected')) paymentStatus='awaiting_cash';
-   const tx=await db.query(`SELECT status FROM payment_transactions WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[String(ride.id)]).catch(()=>[]);
-   if(tx.length && tx[0].status==='pending') paymentStatus='processing';
+   const tx=await db.query(`SELECT status,created_at FROM payment_transactions WHERE JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[String(ride.id)]).catch(()=>[]);
+   // A mobile-money prompt only lives a few minutes; after that the rider may retry or pick another way to pay.
+   if(tx.length && tx[0].status==='pending' && (minutesSince(tx[0].created_at)??0) < LIFE.paymentTtlMin()) paymentStatus='processing';
  }
  ride.reached_destination=reached;
  ride.payment_status=paymentStatus;
+ const stuck=assessStuck(ride,reached);
+ ride.can_force_close=stuck.canForceClose;
+ ride.stuck_reason=stuck.reason;
  ride.amount_due=Math.max(0,Number(ride.estimated_fare)-Number(ride.discount||0)+Number(ride.cancellation_fee||0)+Number(ride.tip||0));
  if(ride.driver_id){
    ride.driver={
@@ -318,6 +395,8 @@ async function accept(driverId,rideId){
   const [rides]=await conn.query(`SELECT * FROM rides WHERE id=? FOR UPDATE`,[rideId]);
   if(!rides.length) throw ApiError.notFound('Ride not found');
   const r=rides[0]; if(r.status!=='searching') throw ApiError.conflict('Ride is no longer available.');
+  const [rel]=await conn.query("SELECT id FROM ride_events WHERE ride_id=? AND event_type='driver_released' AND actor_id=? LIMIT 1",[rideId,driverId]);
+  if(rel.length) throw ApiError.conflict('You released this ride earlier. Another driver will take it.');
   const [dp]=await conn.query(`SELECT d.*,v.id vehicle_id FROM driver_profiles d JOIN vehicles v ON v.driver_id=d.user_id AND v.status='active' AND v.type=? WHERE d.user_id=? AND d.online=1 AND d.application_status='active' LIMIT 1 FOR UPDATE`,[r.ride_type,driverId]);
   if(!dp.length) throw ApiError.forbidden('Driver is not online or has no active matching vehicle.');
   const [busy]=await conn.query("SELECT id FROM rides WHERE driver_id=? AND status IN ('accepted','arriving','arrived','started') LIMIT 1",[driverId]);
@@ -369,6 +448,7 @@ const STATUS_BODIES = {
 async function setStatus(driverId,rideId,status,opts={}){
  if(status!=='completed' && status!=='cancelled') await finance.assertUsable(driverId,'continue accepting rides');
  const allowed={arriving:['accepted'],arrived:['arriving','accepted'],started:['arrived'],completed:['started'],cancelled:['accepted','arriving','arrived']};
+ if(status==='cancelled') return driverRelease(driverId,rideId,opts.reason);
  if(status==='completed'){
    const cur=await db.query('SELECT id FROM ride_events WHERE ride_id=? AND event_type=? LIMIT 1',[rideId,'payment_confirmed']);
    if(!cur.length) throw ApiError.conflict('Payment has not been confirmed yet. The ride ends automatically once the rider has paid (or you confirm cash).');
@@ -442,6 +522,16 @@ async function confirmPaymentAndComplete(rideId,meta={}){
     await conn.query('UPDATE rider_profiles SET cancellation_debt=GREATEST(0,cancellation_debt-?) WHERE user_id=?',[Number(r.cancellation_fee),r.rider_id]);
   }
   await conn.query('UPDATE rider_profiles SET total_rides=total_rides+1 WHERE user_id=?',[r.rider_id]);
+  if(r.promo_code){
+    const [pr]=await conn.query('SELECT id FROM promos WHERE code=? LIMIT 1',[r.promo_code]);
+    if(pr.length){
+      const [ex]=await conn.query('SELECT id FROM promo_redemptions WHERE promo_id=? AND ride_id=? LIMIT 1',[pr[0].id,rideId]);
+      if(!ex.length){
+        await conn.query('INSERT INTO promo_redemptions(promo_id,user_id,ride_id,amount) VALUES(?,?,?,?)',[pr[0].id,r.rider_id,rideId,Number(r.discount||0)]);
+        await conn.query('UPDATE promos SET usage_count=usage_count+1 WHERE id=?',[pr[0].id]);
+      }
+    }
+  }
   return {r,already:false,earning};
  });
  if(!done.already){
@@ -506,8 +596,12 @@ async function payRide(riderId,rideId,input={}){
  }
 
  // Mobile money (momo / card / bank) → provider charge, confirmed by webhook.
- const existing=await db.query(`SELECT id,status FROM payment_transactions WHERE user_id=? AND status='pending' AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[riderId,String(rideId)]);
- if(existing.length) return {...(await getById(rideId,riderId)),payment_status:'processing'};
+ const existing=await db.query(`SELECT id,status,created_at FROM payment_transactions WHERE user_id=? AND status='pending' AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.rideId'))=? AND JSON_UNQUOTE(JSON_EXTRACT(metadata,'$.channel'))='ride_payment' ORDER BY id DESC LIMIT 1`,[riderId,String(rideId)]);
+ if(existing.length){
+   if((minutesSince(existing[0].created_at)??0) < LIFE.paymentTtlMin()) return {...(await getById(rideId,riderId)),payment_status:'processing'};
+   // The earlier prompt was never approved (declined / timed out). Retire it and start a fresh one.
+   await db.query("UPDATE payment_transactions SET status='failed',metadata=JSON_SET(COALESCE(metadata,'{}'),'$.failReason','expired') WHERE id=? AND status='pending'",[existing[0].id]);
+ }
  let phone=input.phone||null;
  if(!phone){ const u=await db.query('SELECT phone FROM users WHERE id=?',[riderId]); phone=u[0]?.phone||null; }
  if(!phone) throw ApiError.badRequest('A mobile-money phone number is required.');
@@ -581,14 +675,27 @@ async function getCancelConfig() {
  */
 async function cancelRider(riderId, rideId, reason) {
   const r = await db.query(
-    `SELECT r.*, d.current_lat, d.current_lng
+    `SELECT r.*, d.current_lat, d.current_lng, d.online driver_online, d.location_updated_at driver_pinged_at
      FROM rides r
      LEFT JOIN driver_profiles d ON d.user_id = r.driver_id
      WHERE r.id = ? AND r.rider_id = ?`,
     [rideId, riderId]
   );
   if (!r.length) throw ApiError.notFound('Ride not found');
-  if (!['searching', 'accepted', 'arriving', 'arrived'].includes(r[0].status)) {
+  if (r[0].status === 'cancelled') return sanitizeRiderRide(await getById(rideId, riderId), riderId); // idempotent
+  if (r[0].status === 'completed') throw ApiError.conflict('This ride is already complete.');
+  let forceClose = false;
+  if (r[0].status === 'started') {
+    const ev = await db.query("SELECT id FROM ride_events WHERE ride_id=? AND event_type='reached_destination' LIMIT 1", [rideId]);
+    const stuck = assessStuck(r[0], ev.length > 0);
+    if (!stuck.canForceClose) {
+      throw ApiError.conflict(ev.length
+        ? 'You have reached your destination. Please complete the payment to finish this ride.'
+        : 'This trip is already under way and cannot be cancelled. If something is wrong, contact support from the app.',
+        { code: 'TRIP_IN_PROGRESS' });
+    }
+    forceClose = true;
+  } else if (!['searching', 'accepted', 'arriving', 'arrived'].includes(r[0].status)) {
     throw ApiError.conflict('This ride cannot be cancelled now.');
   }
   const x = r[0];
@@ -597,7 +704,7 @@ async function cancelRider(riderId, rideId, reason) {
   let near = false;
   let distanceKm = null;
 
-  if (x.driver_id && x.current_lat != null && x.current_lng != null) {
+  if (!forceClose && x.driver_id && x.current_lat != null && x.current_lng != null) {
     distanceKm = finance.haversine(
       Number(x.current_lat),
       Number(x.current_lng),
@@ -614,7 +721,7 @@ async function cancelRider(riderId, rideId, reason) {
     await conn.query(
       `UPDATE rides SET status='cancelled', cancel_reason=?, cancellation_fee=?,
        cancellation_fee_applied=?, cancelled_at=UTC_TIMESTAMP() WHERE id=?`,
-      [reason || 'Cancelled by rider', fee, fee > 0 ? 1 : 0, rideId]
+      [forceClose ? 'Ended by rider: driver became unreachable' : (reason || 'Cancelled by rider'), fee, fee > 0 ? 1 : 0, rideId]
     );
 
     if (fee > 0) {
@@ -649,7 +756,8 @@ async function cancelRider(riderId, rideId, reason) {
           distanceKm,
           percent: cancelCfg.percent,
           nearPickupKm: cancelCfg.nearPickupKm,
-          driverCredited: fee > 0 && !!x.driver_id
+          driverCredited: fee > 0 && !!x.driver_id,
+          forceClosed: forceClose
         })
       ]
     );
@@ -660,10 +768,12 @@ async function cancelRider(riderId, rideId, reason) {
     await pushUser(
       x.driver_id,
       'Ride cancelled by rider',
-      fee > 0
-        ? `Rider cancelled near pickup. You earned TZS ${fee.toLocaleString()} cancellation compensation.`
-        : 'The rider cancelled this request.',
-      { type: 'ride_cancelled', rideId, cancellationFee: fee }
+      forceClose
+        ? 'The rider ended this trip because the app lost contact with you.'
+        : fee > 0
+          ? `Rider cancelled near pickup. You earned TZS ${fee.toLocaleString()} cancellation compensation.`
+          : 'The rider cancelled this request.',
+      { type: 'ride_cancelled', rideId, status: 'cancelled', cancellationFee: fee }
     );
   }
 
@@ -773,9 +883,9 @@ async function nearbyDrivers(lat, lng, radiusKm = 5) {
  * so riders are never left on an endless "finding a driver" screen.
  */
 async function expireStaleSearching() {
-  const windowSec = Math.max(60, Number(process.env.RIDE_SEARCH_WINDOW_SECONDS || 180));
+  const windowSec = LIFE.searchWindowSec();
   const stale = await db.query(
-    `SELECT id, rider_id FROM rides WHERE status='searching' AND created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND) LIMIT 200`,
+    `SELECT id, rider_id FROM rides WHERE status='searching' AND COALESCE(searching_since, created_at) < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND) LIMIT 200`,
     [windowSec]
   );
   let n = 0;
@@ -795,7 +905,107 @@ async function expireStaleSearching() {
   return n;
 }
 
+/* ====================================================================================== *
+ * Lifecycle primitives (used by driver cancel, the reaper and admin tools)
+ * ====================================================================================== */
+
+/** Cancels a ride on behalf of the system/admin. No fees. Returns the pre-cancel row, or null if already terminal. */
+async function cancelSystem(rideId, { reason, actorId = null, event = 'auto_cancelled', flag = false, notify = true } = {}) {
+  const prev = await db.transaction(async (conn) => {
+    const [rows] = await conn.query('SELECT * FROM rides WHERE id=? FOR UPDATE', [rideId]);
+    if (!rows.length) throw ApiError.notFound('Ride not found');
+    const r = rows[0];
+    if (!ACTIVE_STATUSES.includes(r.status)) return null;
+    await conn.query(
+      `UPDATE rides SET status='cancelled', cancelled_at=UTC_TIMESTAMP(), cancel_reason=?, needs_attention=?, attention_reason=? WHERE id=?`,
+      [String(reason || 'Cancelled by ZenjiGO').slice(0, 480), flag ? 1 : 0, flag ? String(reason || '').slice(0, 250) : null, rideId]
+    );
+    await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)', [rideId, actorId, event, JSON.stringify({ reason, previousStatus: r.status })]);
+    return r;
+  });
+  if (prev && notify) {
+    try {
+      await pushUser(prev.rider_id, 'Ride cancelled', reason ? String(reason) : 'Your ride was cancelled.', { type: 'ride_status', rideId: String(rideId), status: 'cancelled' });
+      if (prev.driver_id) await pushUser(prev.driver_id, 'Ride cancelled', reason ? String(reason) : 'This ride was cancelled.', { type: 'ride_cancelled', rideId: String(rideId), status: 'cancelled' });
+    } catch (e) { console.warn('[cancelSystem notify]', e.message); }
+  }
+  return prev;
+}
+
+/**
+ * Takes a not-yet-started ride away from its driver and puts it back into the search pool.
+ * If it has been re-dispatched too many times it is cancelled instead (rider is told to try again).
+ * Returns { outcome: 'searching'|'cancelled'|'noop', previousDriverId, riderId }.
+ */
+async function redispatchRide(rideId, { reason = 'driver_unavailable', actorId = null, releasedByDriver = false, message } = {}) {
+  const res = await db.transaction(async (conn) => {
+    const [rows] = await conn.query('SELECT * FROM rides WHERE id=? FOR UPDATE', [rideId]);
+    if (!rows.length) throw ApiError.notFound('Ride not found');
+    const r = rows[0];
+    if (!['accepted', 'arriving', 'arrived'].includes(r.status)) return { outcome: 'noop', r };
+    const prevDriver = r.driver_id;
+    if (Number(r.redispatch_count || 0) >= LIFE.maxRedispatch()) {
+      await conn.query(
+        `UPDATE rides SET status='cancelled', cancelled_at=UTC_TIMESTAMP(), cancel_reason=? WHERE id=?`,
+        ['No driver could complete this ride. Please request again.', rideId]
+      );
+      await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)', [rideId, actorId, 'auto_cancelled', JSON.stringify({ reason: 'redispatch_limit', lastReason: reason })]);
+      return { outcome: 'cancelled', r, prevDriver };
+    }
+    await conn.query(
+      `UPDATE rides SET status='searching', driver_id=NULL, vehicle_id=NULL, accepted_at=NULL, arrived_at=NULL,
+         searching_since=UTC_TIMESTAMP(), redispatch_count=redispatch_count+1 WHERE id=?`,
+      [rideId]
+    );
+    if (prevDriver) {
+      await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)', [rideId, prevDriver, 'driver_released', JSON.stringify({ reason, byDriver: !!releasedByDriver })]);
+    }
+    await conn.query('INSERT INTO ride_events(ride_id,actor_id,event_type,payload) VALUES(?,?,?,?)', [rideId, actorId, 'redispatched', JSON.stringify({ reason, previousDriverId: prevDriver || null })]);
+    // Events the previous driver produced (arrival / pin etc.) must not leak into the next attempt.
+    await conn.query("DELETE FROM ride_events WHERE ride_id=? AND event_type IN ('reached_destination','rider_cash_selected')", [rideId]);
+    return { outcome: 'searching', r, prevDriver };
+  });
+
+  const { outcome, r, prevDriver } = res;
+  if (outcome === 'noop') return { outcome, riderId: r.rider_id };
+  try {
+    if (outcome === 'searching') {
+      await pushUser(r.rider_id, 'Finding you another driver', message || 'Your driver is no longer available. We are looking for another driver right now.', { type: 'ride_status', rideId: String(rideId), status: 'searching' });
+      await notifyAvailableDrivers(rideId, r.ride_type, r.pickup_lat, r.pickup_lng, prevDriver ? [prevDriver] : []);
+    } else {
+      await pushUser(r.rider_id, 'Ride cancelled', 'We could not find a driver who could complete your ride. Please request again.', { type: 'ride_status', rideId: String(rideId), status: 'cancelled' });
+    }
+    if (prevDriver && !releasedByDriver) await pushUser(prevDriver, 'Ride reassigned', 'This ride was handed to another driver.', { type: 'ride_cancelled', rideId: String(rideId), status: 'cancelled' });
+  } catch (e) { console.warn('[redispatch notify]', e.message); }
+  return { outcome, previousDriverId: prevDriver || null, riderId: r.rider_id };
+}
+
+/** A driver hands the ride back before the trip starts. The rider keeps their request and gets a new driver. */
+async function driverRelease(driverId, rideId, reason) {
+  const rows = await db.query('SELECT id,status,ride_code FROM rides WHERE id=? AND driver_id=?', [rideId, driverId]);
+  if (!rows.length) throw ApiError.notFound('Ride not found');
+  const r = rows[0];
+  if (r.status === 'cancelled' || r.status === 'searching') return { id: Number(rideId), status: 'cancelled', released: true, ride_code: r.ride_code };
+  if (!['accepted', 'arriving', 'arrived'].includes(r.status)) {
+    throw ApiError.conflict(r.status === 'started'
+      ? 'The trip has already started and cannot be cancelled. Complete it, or contact support if there is a problem.'
+      : `Cannot cancel a ride that is ${r.status}.`);
+  }
+  await redispatchRide(rideId, { reason: String(reason || 'driver_cancelled').slice(0, 120), actorId: driverId, releasedByDriver: true,
+    message: 'Your driver had to cancel. We are finding you another driver right now.' });
+  return { id: Number(rideId), status: 'cancelled', released: true, ride_code: r.ride_code };
+}
+
 module.exports = {
+  ACTIVE_STATUSES,
+  LIFE,
+  minutesSince,
+  assessStuck,
+  cancelSystem,
+  redispatchRide,
+  driverRelease,
+  pushUser,
+  notifyAvailableDrivers,
   expireStaleSearching,
   quote,
   create,

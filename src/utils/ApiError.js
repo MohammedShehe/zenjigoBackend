@@ -6,6 +6,6 @@ class ApiError extends Error {
   static unauthorized(m='Unauthorized'){return new ApiError(401,m)}
   static forbidden(m='Forbidden'){return new ApiError(403,m)}
   static notFound(m='Not found'){return new ApiError(404,m)}
-  static conflict(m='Conflict'){return new ApiError(409,m)}
+  static conflict(m='Conflict',d){return new ApiError(409,m,d)}
 }
 module.exports = ApiError;

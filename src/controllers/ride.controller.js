@@ -2,6 +2,10 @@ const service=require('../services/ride.service'); const {ok}=require('../utils/
 exports.quote=asyncHandler(async(req,res)=>ok(res,await service.quote(req.body)));
 exports.create=asyncHandler(async(req,res)=>ok(res,await service.create(req.user.sub,req.body),'Ride requested',201));
 exports.list=asyncHandler(async(req,res)=>ok(res,await service.listForUser(req.user.sub,req.user.role,req.query.limit)));
+const lifecycle=require('../services/ride.lifecycle.service');
+/** The caller's current non-finished ride (or null) so apps can resume it after a restart / new device. */
+exports.active=asyncHandler(async(req,res)=>ok(res,{ride:await lifecycle.getActiveRide(req.user.sub,req.user.role)}));
+exports.unrated=asyncHandler(async(req,res)=>ok(res,{ride:req.user.role==='rider'?await lifecycle.getUnratedCompleted(req.user.sub):null}));
 exports.get=asyncHandler(async(req,res)=>ok(res,await service.getById(req.params.id,req.user.sub)));
 exports.cancel=asyncHandler(async(req,res)=>ok(res,await service.cancelRider(req.user.sub,req.params.id,req.body.reason),'Ride cancelled'));
 exports.pay=asyncHandler(async(req,res)=>{

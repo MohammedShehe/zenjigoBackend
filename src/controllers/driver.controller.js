@@ -17,17 +17,18 @@ exports.requests=asyncHandler(async(req,res)=>{
  const radiusKm=Number(process.env.DISPATCH_RADIUS_KM||8);
  const hasPos=me.length&&me[0].current_lat!=null&&me[0].current_lng!=null;
  const deg=radiusKm/111;
- const params=[req.user.sub];
+ const params=[req.user.sub,req.user.sub];
  let geo='';
  if(hasPos){ geo=' AND r.pickup_lat BETWEEN ? AND ? AND r.pickup_lng BETWEEN ? AND ?'; const la=Number(me[0].current_lat),ln=Number(me[0].current_lng); params.push(la-deg,la+deg,ln-deg,ln+deg); }
- const rows=await db.query(`SELECT r.id,r.ride_code,r.ride_type,r.pickup_address,r.destination_address,r.pickup_lat,r.pickup_lng,r.destination_lat,r.destination_lng,r.estimated_fare,r.estimated_distance_km,r.estimated_duration_min,r.created_at FROM rides r WHERE r.status='searching' AND r.created_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 10 MINUTE) AND r.ride_type IN (SELECT type FROM vehicles WHERE driver_id=? AND status='active')${geo} ORDER BY r.created_at DESC LIMIT 30`,params);
+ const rows=await db.query(`SELECT r.id,r.ride_code,r.ride_type,r.pickup_address,r.destination_address,r.pickup_lat,r.pickup_lng,r.destination_lat,r.destination_lng,r.estimated_fare,r.estimated_distance_km,r.estimated_duration_min,r.created_at FROM rides r WHERE r.status='searching' AND COALESCE(r.searching_since,r.created_at)>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 10 MINUTE) AND r.ride_type IN (SELECT type FROM vehicles WHERE driver_id=? AND status='active') AND NOT EXISTS (SELECT 1 FROM ride_events x WHERE x.ride_id=r.id AND x.event_type='driver_released' AND x.actor_id=?)${geo} ORDER BY r.created_at DESC LIMIT 30`,params);
  if(f.blocked || f.grossSinceSettlement>=finance.THRESHOLD){
    return ok(res,{restricted:true,settlementRequired:true,commissionOwed:f.commissionOwed,threshold:finance.THRESHOLD,requests:rows.map(r=>({id:r.id,ride_code:r.ride_code,ride_type:r.ride_type,pickup_lat:r.pickup_lat,pickup_lng:r.pickup_lng,estimated_distance_km:r.estimated_distance_km,created_at:r.created_at,masked:true}))});
  }
  ok(res,{restricted:false,settlementRequired:false,requests:rows});
 });
 exports.accept=asyncHandler(async(req,res)=>ok(res,await ride.accept(req.user.sub,req.params.id),'Ride accepted'));
-exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status,{otp:req.body.otp}),'Ride status updated'));
+exports.status=asyncHandler(async(req,res)=>ok(res,await ride.setStatus(req.user.sub,req.params.id,req.body.status,{otp:req.body.otp,reason:req.body.reason}),'Ride status updated'));
+exports.activeRide=asyncHandler(async(req,res)=>ok(res,{ride:await require('../services/ride.lifecycle.service').getActiveRide(req.user.sub,'driver')}));
 exports.getRide=asyncHandler(async(req,res)=>ok(res,await ride.getById(req.params.id,req.user.sub)));
 exports.reachedDestination=asyncHandler(async(req,res)=>ok(res,await ride.reachedDestination(req.user.sub,req.params.id),'Destination reached'));
 exports.collectCash=asyncHandler(async(req,res)=>ok(res,await ride.collectCash(req.user.sub,req.params.id),'Cash received'));

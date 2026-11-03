@@ -47,7 +47,12 @@ router.delete('/admins/:id', c.deleteAdmin);
 
 // Rides
 router.get('/rides', c.rides);
+router.get('/rides/attention', c.ridesAttention);
 router.get('/rides/:id', c.ride);
+router.post('/rides/:id/cancel', c.cancelRide);
+router.post('/rides/:id/complete', c.completeRide);
+router.post('/rides/:id/redispatch', c.redispatchRide);
+router.post('/rides/:id/dismiss-flag', c.dismissRideFlag);
 router.get('/live-map', c.liveMap);
 router.get('/maps-config', c.mapsConfig);
 
