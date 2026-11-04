@@ -41,4 +41,15 @@ const otpLimiter = rateLimit({
   message: { success: false, message: 'Too many code requests. Please wait a few minutes and try again.' }
 });
 
-module.exports = { globalLimiter, otpLimiter };
+// Brute-force protection for credential/OTP verification endpoints (per IP + per target email).
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX || 30),
+  keyGenerator: (req) => `auth:${req.ip}:${String(req.body?.email || req.body?.target || '').toLowerCase()}`,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { keyGeneratorIpFallback: false },
+  message: { success: false, message: 'Too many attempts. Please wait a few minutes and try again.' }
+});
+
+module.exports = { globalLimiter, otpLimiter, authLimiter };

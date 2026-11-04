@@ -90,7 +90,16 @@ router.post('/webhook', async (req, res) => {
       });
     }
 
+    // A payment already marked 'success' is only a no-op for wallet top-ups. For ride payments the
+    // ride completion may have failed after the payment was marked (provider got a 5xx and retried);
+    // re-run the idempotent ride confirmation so payment and ride can never diverge.
     if (payment.status === 'success') {
+      const chDone = paymentChannel(payment);
+      if (chDone.channel === 'ride_payment' && chDone.rideId) {
+        await rideService.confirmRidePaymentFromProvider(Number(chDone.rideId), payment.user_id, {
+          reference: payment.external_reference, amount: payment.amount
+        });
+      }
       return res.json({ success: true, data: { paymentId: payment.id, status: 'success' } });
     }
 
@@ -130,8 +139,10 @@ router.post('/webhook', async (req, res) => {
       data: { paymentId: payment.id, status: payment.status }
     });
   } catch (e) {
-    console.error('[Snippe webhook]', e.message);
-    return res.status(e.statusCode || 500).json({ success: false, message: e.message });
+    console.error(JSON.stringify({ evt: 'payment.webhook_error', requestId: req.id, message: e.message }));
+    // 5xx => provider retries (processing is idempotent). 4xx only for genuinely bad requests.
+    const code = e.statusCode && e.statusCode < 500 ? e.statusCode : 500;
+    return res.status(code).json({ success: false, message: code === 500 ? 'Webhook processing failed' : e.message });
   }
 });
 

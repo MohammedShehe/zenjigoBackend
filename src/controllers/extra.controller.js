@@ -2,6 +2,7 @@ const db = require('../config/db');
 const ApiError = require('../utils/ApiError');
 const { ok } = require('../utils/response');
 const asyncHandler = require('../utils/asyncHandler');
+const finance = require('../services/driver_finance.service');
 
 const code = (p) =>
   `${p}${Date.now().toString(36).toUpperCase().slice(-8)}${Math.floor(Math.random() * 99)
@@ -116,8 +117,28 @@ exports.appVersion = asyncHandler(async (req, res) => {
 });
 
 
-/** Pending parcels for online drivers */
+/** True when the driver owes settlement (same rule as GET /driver/ride-requests and accept). */
+async function isRestricted(driverId) {
+  const f = await finance.getStatus(driverId);
+  return !!(f.blocked || f.commissionOwed > 0);
+}
+
+/** Only an admin-approved, active driver may take on work. */
+async function assertActiveDriver(driverId) {
+  const r = await db.query(
+    `SELECT 1 FROM driver_profiles d JOIN users u ON u.id=d.user_id
+     WHERE d.user_id=? AND d.application_status='active' AND u.status='active' LIMIT 1`, [driverId]);
+  if (!r.length) throw ApiError.forbidden('Your driver account is not approved to accept work.');
+}
+
+/** Pending parcels. Drivers who owe settlement get map-pin data only (no addresses, parties or fares). */
 exports.pendingParcels = asyncHandler(async (req, res) => {
+  if (await isRestricted(req.user.sub)) {
+    const rows = await db.query(
+      `SELECT id, parcel_code, pickup_lat, pickup_lng, created_at FROM parcels WHERE status='pending' AND driver_id IS NULL ORDER BY id DESC LIMIT 50`);
+    // Explicit whitelist: nothing else can leak even if the query is later widened.
+    return ok(res, rows.map((r) => ({ id: r.id, parcel_code: r.parcel_code, pickup_lat: r.pickup_lat, pickup_lng: r.pickup_lng, created_at: r.created_at, masked: true, settlementRequired: true })));
+  }
   const rows = await db.query(
     `SELECT * FROM parcels WHERE status='pending' AND driver_id IS NULL ORDER BY pickup_at IS NULL, pickup_at ASC, id DESC LIMIT 50`
   );
@@ -125,14 +146,21 @@ exports.pendingParcels = asyncHandler(async (req, res) => {
 });
 
 exports.acceptParcel = asyncHandler(async (req, res) => {
-  const id = req.params.id;
-  const rows = await db.query(`SELECT * FROM parcels WHERE id=? AND status='pending' AND driver_id IS NULL`, [id]);
-  if (!rows.length) throw ApiError.notFound('Parcel not available');
-  await db.query(`UPDATE parcels SET driver_id=?, status='assigned' WHERE id=?`, [req.user.sub, id]);
-  ok(res, { id: Number(id) }, 'Parcel accepted');
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.badRequest('Invalid parcel.');
+  await finance.assertUsable(req.user.sub, 'accept parcels');
+  await assertActiveDriver(req.user.sub);
+  // Single atomic claim: only one driver can flip pending -> assigned.
+  const r = await db.query(`UPDATE parcels SET driver_id=?, status='assigned' WHERE id=? AND status='pending' AND driver_id IS NULL`, [req.user.sub, id]);
+  if (!r.affectedRows) throw ApiError.conflict('Parcel is no longer available.');
+  ok(res, { id }, 'Parcel accepted');
 });
 
 exports.pendingTours = asyncHandler(async (req, res) => {
+  if (await isRestricted(req.user.sub)) {
+    // Tour bookings carry no coordinates, so a restricted driver gets nothing to act on.
+    return ok(res, []);
+  }
   const rows = await db.query(
     `SELECT b.*, p.name package_name, p.description package_description, p.duration_hours
      FROM tour_bookings b
@@ -144,9 +172,11 @@ exports.pendingTours = asyncHandler(async (req, res) => {
 });
 
 exports.acceptTour = asyncHandler(async (req, res) => {
-  const id = req.params.id;
-  const rows = await db.query(`SELECT * FROM tour_bookings WHERE id=? AND status='pending' AND driver_id IS NULL`, [id]);
-  if (!rows.length) throw ApiError.notFound('Tour booking not available');
-  await db.query(`UPDATE tour_bookings SET driver_id=?, status='assigned' WHERE id=?`, [req.user.sub, id]);
-  ok(res, { id: Number(id) }, 'Tour accepted');
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) throw ApiError.badRequest('Invalid booking.');
+  await finance.assertUsable(req.user.sub, 'accept tours');
+  await assertActiveDriver(req.user.sub);
+  const r = await db.query(`UPDATE tour_bookings SET driver_id=?, status='assigned' WHERE id=? AND status='pending' AND driver_id IS NULL`, [req.user.sub, id]);
+  if (!r.affectedRows) throw ApiError.conflict('Tour booking is no longer available.');
+  ok(res, { id }, 'Tour accepted');
 });

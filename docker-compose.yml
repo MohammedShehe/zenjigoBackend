@@ -1,30 +1,45 @@
+# Production-style stack. Secrets come from the host environment / an untracked .env file,
+# never from the image. Copy .env.example -> .env and fill it in on the server.
 services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: zenjigo
-      MYSQL_ROOT_PASSWORD: change_me
-    ports:
-      - "3306:3306"
+      MYSQL_DATABASE: ${DB_NAME:-zenjigo}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+    # No published port: the API reaches MySQL over the private compose network only.
+    expose:
+      - "3306"
     volumes:
       - zenjigo_mysql:/var/lib/mysql
     healthcheck:
-      test: ["CMD","mysqladmin","ping","-h","localhost","-pchange_me"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 20s
 
   api:
     build: .
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      NODE_ENV: production
+      # Inside the compose network the DB host is the SERVICE NAME, never localhost.
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      DB_NAME: ${DB_NAME:-zenjigo}
     ports:
       - "5000:5000"
     depends_on:
       mysql:
         condition: service_healthy
+    volumes:
+      # Mount the Firebase key at runtime instead of baking it into the image.
+      - ./secrets/firebase-service-account.json:/run/secrets/firebase-service-account.json:ro
 
 volumes:
   zenjigo_mysql:

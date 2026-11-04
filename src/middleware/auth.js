@@ -15,7 +15,7 @@ async function auth(req, _res, next) {
     if (!rows.length) {
       throw ApiError.unauthorized('Account no longer exists or has been archived.');
     }
-    if (rows[0].status === 'suspended' || rows[0].status === 'rejected') {
+    if (['suspended', 'rejected', 'banned'].includes(rows[0].status)) {
       throw ApiError.forbidden('This account is suspended.');
     }
     req.user = { ...payload, role: rows[0].role, status: rows[0].status };

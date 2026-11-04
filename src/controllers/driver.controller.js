@@ -1,6 +1,6 @@
 const s=require('../services/driver.service'); const ride=require('../services/ride.service'); const {ok}=require('../utils/response'); const asyncHandler=require('../utils/asyncHandler'); const db=require('../config/db'); const finance=require('../services/driver_finance.service');
 exports.register=asyncHandler(async(req,res)=>ok(res,await s.register(req.body,req.files),'Application submitted',201));
-exports.applicationStatus=asyncHandler(async(req,res)=>ok(res,await s.applicationStatus(req.params.driverId)));
+exports.applicationStatus=asyncHandler(async(req,res)=>ok(res,await s.applicationStatus(req.params.driverId,req.user)));
 
 exports.profile=asyncHandler(async(req,res)=>ok(res,await s.profile(req.user.sub)));
 exports.documents=asyncHandler(async(req,res)=>ok(res,await s.documents(req.user.sub)));

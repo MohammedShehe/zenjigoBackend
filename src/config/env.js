@@ -7,6 +7,9 @@ const requiredInProduction = [
 ];
 
 if (process.env.NODE_ENV === 'production') {
+  if (/dev-(access|refresh)-secret/.test(`${process.env.JWT_ACCESS_SECRET}${process.env.JWT_REFRESH_SECRET}`) || String(process.env.JWT_ACCESS_SECRET || '').length < 32) {
+    throw new Error('JWT secrets must be set to long random values (>=32 chars) in production.');
+  }
   const missing = requiredInProduction.filter((k) => !process.env[k] || process.env[k].includes('CHANGE_ME'));
   const firebaseConfigured = (process.env.FIREBASE_SERVICE_ACCOUNT_PATH && require('fs').existsSync(require('path').resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH))) || (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
   if (!firebaseConfigured) missing.push('FIREBASE_SERVICE_ACCOUNT_PATH or FIREBASE_PROJECT_ID/FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY');

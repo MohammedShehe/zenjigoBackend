@@ -80,11 +80,8 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
         await otp.send({ target: mail, purpose: 'login', channel: 'email' });
         return { target: mail, maskedEmail: maskEmail(mail) };
       }
-      throw ApiError.notFound(
-        resolvedRole
-          ? `No ${resolvedRole} account found for these credentials.`
-          : 'No account found for these credentials.'
-      );
+      // Do not reveal whether the account exists: respond exactly like a successful send.
+      return { target: mail, maskedEmail: maskEmail(mail) };
     }
 
     const registered = String(user.email || '').trim().toLowerCase();
@@ -94,9 +91,8 @@ async function sendOtp({ phone, email, purpose = 'login', role = null }) {
 
     // If the client supplied an email, it must match the account (prevents sending codes to the wrong inbox)
     if (mail && mail !== registered) {
-      throw ApiError.badRequest(
-        'The email you entered does not match the email registered for this phone number.'
-      );
+      // Same generic response as an unknown account; never send to, or confirm, another inbox.
+      return { target: mail, maskedEmail: maskEmail(mail) };
     }
 
     await otp.send({ target: registered, purpose, channel: 'email' });
@@ -172,7 +168,7 @@ async function loginAdmin({ email, password }) {
     throw ApiError.unauthorized('Invalid admin credentials.');
   }
   const admin = rows[0];
-  if (admin.status !== 'active') throw ApiError.forbidden('Admin account is not active.');
+  if (admin.status !== 'active') throw ApiError.unauthorized('Invalid admin credentials.');
   await otp.send({ target: normalizedEmail, purpose: 'admin_login', channel: 'email' });
   return { maskedEmail: maskEmail(normalizedEmail), requiresOtp: true };
 }
@@ -182,7 +178,7 @@ async function verifyAdminOtp({ email, code }) {
   const rows = await db.query('SELECT * FROM users WHERE email=? AND role="admin" LIMIT 1', [normalizedEmail]);
   if (!rows.length) throw ApiError.unauthorized('Invalid admin credentials.');
   const admin = rows[0];
-  if (admin.status !== 'active') throw ApiError.forbidden('Admin account is not active.');
+  if (admin.status !== 'active') throw ApiError.unauthorized('Invalid admin credentials.');
   await otp.verify({ target: normalizedEmail, code, purpose: 'admin_login' });
   await db.query('UPDATE users SET phone_verified_at=COALESCE(phone_verified_at,UTC_TIMESTAMP()),last_login_at=UTC_TIMESTAMP() WHERE id=?', [admin.id]);
   const fresh = (await db.query('SELECT * FROM users WHERE id=?', [admin.id]))[0] || admin;
@@ -200,6 +196,7 @@ async function loginDriver({ phone, email, code }) {
 
   // Email is the only authentication factor for the driver app. Phone may
   // remain on the profile as contact data, but is not required for sign-in.
+  const GENERIC = 'Invalid email or verification code.';
   const rows = await db.query(
     `SELECT u.*, d.application_status
        FROM users u
@@ -209,15 +206,21 @@ async function loginDriver({ phone, email, code }) {
     [mail]
   );
   if (!rows.length) {
-    throw ApiError.notFound('Driver account not found. Complete driver registration first.');
+    // Burn the same work so response shape/timing does not reveal account existence.
+    try { await otp.verify({ target: mail, code: String(code).trim(), purpose: 'login' }); } catch (_) {}
+    throw ApiError.unauthorized(GENERIC);
   }
   const user = rows[0];
-  if (user.status === 'suspended' || user.status === 'banned') {
-    throw ApiError.forbidden('This driver account is suspended.');
+  try {
+    await otp.verify({ target: mail, code: String(code).trim(), purpose: 'login' });
+  } catch (e) {
+    throw (e && e.statusCode === 429) ? e : ApiError.unauthorized(GENERIC);
   }
-
-  await otp.verify({ target: mail, code: String(code).trim(), purpose: 'login' });
+  if (['suspended', 'banned', 'rejected'].includes(user.status)) {
+    throw ApiError.forbidden('This driver account cannot sign in. Please contact ZenjiGO support.');
+  }
   await db.query('UPDATE users SET last_login_at=UTC_TIMESTAMP() WHERE id=?', [user.id]);
+  console.info(JSON.stringify({ evt: 'auth.login', role: 'driver', userId: user.id }));
   return {
     user: { ...publicUser(user), applicationStatus: user.application_status },
     accessToken: signAccess({ sub: user.id, role: 'driver' }),

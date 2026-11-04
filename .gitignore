@@ -22,7 +22,6 @@ logs/
 .env
 .env.local
 .env.*.local
-.env.example
 firebase-service-account.json
 
 # Android
@@ -58,3 +57,5 @@ DerivedData/
 # OS-specific
 .DS_Store
 Thumbs.db
+secrets/*
+!secrets/README.txt

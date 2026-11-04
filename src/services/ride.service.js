@@ -794,6 +794,10 @@ async function rate(riderId,rideId,stars,feedback,tip){
  await db.query('UPDATE driver_profiles SET rating=? WHERE user_id=?',[avg,r[0].driver_id]); return {rating:stars,tip:Number(tip||0)};
 }
 async function chargeWallet(userId,amount,type,refId,description){
+ amount=Number(amount);
+ // A debit must be a finite, strictly positive amount. A negative value would otherwise pass the
+ // balance check and silently CREDIT the wallet.
+ if(!Number.isFinite(amount)||amount<=0) throw ApiError.badRequest('Invalid charge amount.');
  return db.transaction(async conn=>{
   const [w]=await conn.query('SELECT balance FROM wallets WHERE user_id=? FOR UPDATE',[userId]); if(!w.length||Number(w[0].balance)<amount)throw ApiError.badRequest('Insufficient wallet balance.');
   const before=Number(w[0].balance),after=before-amount; await conn.query('UPDATE wallets SET balance=? WHERE user_id=?',[after,userId]); await conn.query('INSERT INTO wallet_transactions(user_id,type,amount,balance_before,balance_after,reference_type,reference_id,payment_method,description) VALUES(?,?,?,?,?,?,?,?,?)',[userId,type,-amount,before,after,type,refId,'wallet',description]); return after;

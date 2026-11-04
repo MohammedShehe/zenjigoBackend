@@ -170,7 +170,7 @@ setInterval(() => {
 async function location(id, b) {
   const lat = Number(b && b.lat);
   const lng = Number(b && b.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+  if (!require('../utils/geo').validCoords(lat, lng)) {
     throw ApiError.badRequest('Invalid location.');
   }
   const r = await db.query(
@@ -178,7 +178,9 @@ async function location(id, b) {
     [lat, lng, id]
   );
   if (!r.affectedRows) throw ApiError.notFound('Driver not found');
-  const rideId = b.rideId || null;
+  // SECURITY: never trust a client-supplied rideId. Derive it from the driver's own active ride.
+  const _act = await db.query("SELECT id FROM rides WHERE driver_id=? AND status IN ('accepted','arriving','arrived','started') ORDER BY id DESC LIMIT 1", [id]);
+  const rideId = _act.length ? _act[0].id : null;
   // Breadcrumb history is throttled: the live position above is always fresh, but writing a row on every
   // GPS tick from every driver would flood the database.
   const nowMs = Date.now();
@@ -255,11 +257,21 @@ async function earnings(id,from,to){
  const total=rows.reduce((s,r)=>s+Number(r.driver_share||0),0); return {total:Number(total.toFixed(2)),days:rows};
 }
 async function payout(id,b){
- const amount=Number(b.amount); if(!amount||amount<=0)throw ApiError.badRequest('Invalid payout amount.');
- const p=await db.query('SELECT total_earnings FROM driver_profiles WHERE user_id=?',[id]); if(!p.length)throw ApiError.notFound('Driver not found.');
- const paid=await db.query(`SELECT COALESCE(SUM(amount),0) total FROM payout_requests WHERE driver_id=? AND status IN ('pending','approved','paid')`,[id]);
- const available=Number(p[0].total_earnings)-Number(paid[0].total); if(amount>available)throw ApiError.badRequest('Requested payout exceeds available earnings.');
- const r=await db.query('INSERT INTO payout_requests(driver_id,amount,method,account_details) VALUES(?,?,?,?)',[id,amount,b.method,JSON.stringify(b.accountDetails||{})]); return {id:r.insertId,status:'pending'};
+ b=b||{};
+ const amount=Number(b.amount);
+ if(!Number.isFinite(amount)||amount<=0)throw ApiError.badRequest('Invalid payout amount.');
+ const method=String(b.method||'').trim().slice(0,40);
+ if(!method)throw ApiError.badRequest('A payout method is required.');
+ // Lock the driver row so two concurrent requests cannot both pass the "available" check.
+ return db.transaction(async conn=>{
+  const [p]=await conn.query('SELECT total_earnings FROM driver_profiles WHERE user_id=? FOR UPDATE',[id]);
+  if(!p.length)throw ApiError.notFound('Driver not found.');
+  const [paid]=await conn.query(`SELECT COALESCE(SUM(amount),0) total FROM payout_requests WHERE driver_id=? AND status IN ('pending','approved','paid')`,[id]);
+  const available=Number(p[0].total_earnings)-Number(paid[0].total);
+  if(amount>available)throw ApiError.badRequest('Requested payout exceeds available earnings.');
+  const [r]=await conn.query('INSERT INTO payout_requests(driver_id,amount,method,account_details) VALUES(?,?,?,?)',[id,amount,method,JSON.stringify(b.accountDetails||{})]);
+  return {id:r.insertId,status:'pending'};
+ });
 }
 
 
@@ -282,22 +294,24 @@ async function ensureChangeRequestsTable() {
   } catch (e) { console.warn('[ensureChangeRequestsTable]', e.message); }
 }
 
-async function applicationStatus(driverId){
+async function applicationStatus(driverId, requester = {}){
   const id = Number(driverId);
   if(!id) throw ApiError.badRequest('Invalid driver id');
+  // Ownership: a driver may only read their own application; admins may read any.
+  if(requester.role !== 'admin' && Number(requester.sub) !== id) throw ApiError.notFound('Application not found');
   const rows = await db.query(
-    `SELECT u.id, u.status AS user_status, dp.application_status, dp.rejection_reason, dp.rating, dp.total_rides
+    `SELECT u.id, u.status AS user_status, dp.application_status, dp.rejection_reason
      FROM users u LEFT JOIN driver_profiles dp ON dp.user_id=u.id
      WHERE u.id=? AND u.role='driver' LIMIT 1`, [id]
   );
   if(!rows.length) throw ApiError.notFound('Application not found');
   const r = rows[0];
+  // No ratings / ride totals / other personal data here.
   return {
     driverId: r.id,
-    applicationStatus: r.application_status || 'Pending',
+    applicationStatus: r.application_status || 'pending',
     userStatus: r.user_status,
     rejectionReason: r.rejection_reason || null,
-    rating: r.rating != null ? Number(r.rating) : null,
   };
 }
 
@@ -414,53 +428,44 @@ async function removeProfilePhoto(driverId){
 
 
 /**
- * Exchange driverId + email for a session when the application is approved/active
- * (or still pending — allows finishing onboarding without a second OTP).
+ * Recover a driver session. SECURITY: requires proof of mailbox ownership — a valid, unexpired,
+ * single-use email OTP (purpose "login", requested via POST /auth/driver/send-otp).
+ * driverId + email alone NEVER yields a session. All failures return one generic message.
  */
-async function bootstrapSession({ driverId, email }) {
+async function bootstrapSession({ driverId, email, code }) {
+  const GENERIC = 'Invalid email or verification code.';
   const id = Number(driverId);
   const mail = String(email || '').trim().toLowerCase();
-  if (!id || !mail) throw ApiError.badRequest('driverId and email are required');
+  if (!mail || !String(code || '').trim()) throw ApiError.badRequest('Email and verification code are required.');
   const rows = await db.query(
     `SELECT u.id,u.full_name,u.phone,u.email,u.photo_url,u.status,u.role,d.application_status,d.driver_code,d.online,d.rating
      FROM users u JOIN driver_profiles d ON d.user_id=u.id
-     WHERE u.id=? AND u.role='driver' AND LOWER(u.email)=? LIMIT 1`,
-    [id, mail]
+     WHERE u.role='driver' AND LOWER(u.email)=? ${id ? 'AND u.id=?' : ''} LIMIT 1`,
+    id ? [mail, id] : [mail]
   );
-  if (!rows.length) throw ApiError.unauthorized('Driver not found for this email');
+  try {
+    await otp.verify({ target: mail, code: String(code).trim(), purpose: 'login' });
+  } catch (e) {
+    throw (e && e.statusCode === 429) ? e : ApiError.unauthorized(GENERIC);
+  }
+  if (!rows.length) throw ApiError.unauthorized(GENERIC);
   const u = rows[0];
-  if (u.status === 'suspended' || u.status === 'rejected') {
-    throw ApiError.forbidden('This account is suspended or rejected.');
+  if (['suspended', 'rejected', 'banned'].includes(u.status)) {
+    throw ApiError.forbidden('This account cannot sign in. Please contact ZenjiGO support.');
   }
-  // Mark user active if application approved so refresh tokens work
-  const appStatus = String(u.application_status || '').toLowerCase();
-  if ((appStatus === 'approved' || appStatus === 'active') && u.status !== 'active') {
-    await db.query(`UPDATE users SET status='active' WHERE id=?`, [id]);
-    u.status = 'active';
-  }
-  if (appStatus === 'approved') {
-    await db.query(`UPDATE driver_profiles SET application_status='active' WHERE user_id=?`, [id]).catch(() => {});
-    u.application_status = 'active';
-  }
+  // NOTE: application_status is only ever changed by an administrator. Signing in never
+  // promotes an application to active (previous code did; removed).
   const accessToken = signAccess({ sub: u.id, role: 'driver' });
   const refreshToken = await issueRefreshToken(u.id, 'driver');
+  console.info(JSON.stringify({ evt: 'auth.bootstrap_session', userId: u.id }));
   return {
     accessToken,
     refreshToken,
     user: {
-      id: u.id,
-      role: 'driver',
-      fullName: u.full_name,
-      full_name: u.full_name,
-      phone: u.phone,
-      email: u.email,
-      photoUrl: u.photo_url,
-      photo_url: u.photo_url,
-      status: u.status,
-      application_status: u.application_status,
-      applicationStatus: u.application_status,
-      driver_code: u.driver_code,
-      online: !!u.online,
+      id: u.id, role: 'driver', fullName: u.full_name, full_name: u.full_name, phone: u.phone,
+      email: u.email, photoUrl: u.photo_url, photo_url: u.photo_url, status: u.status,
+      application_status: u.application_status, applicationStatus: u.application_status,
+      driver_code: u.driver_code, online: !!u.online,
       rating: u.rating != null ? Number(u.rating) : null,
     },
     driverId: u.id,

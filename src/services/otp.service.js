@@ -23,6 +23,14 @@ function hashCode(code) {
   return crypto.createHash('sha256').update(String(code)).digest('hex');
 }
 
+function safeEqualHex(a, b) {
+  try {
+    const x = Buffer.from(String(a || ''), 'hex');
+    const y = Buffer.from(String(b || ''), 'hex');
+    return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
+  } catch (_) { return false; }
+}
+
 function generateCode() {
   const n = crypto.randomInt(0, 10 ** OTP_LENGTH);
   return String(n).padStart(OTP_LENGTH, '0');
@@ -81,7 +89,14 @@ async function send({ target, purpose = 'login', channel }) {
       Date.now() - new Date(recent[0].last_sent_at).getTime() < config.security.otpResendSeconds * 1000) {
     throw ApiError.badRequest(`Please wait ${config.security.otpResendSeconds} seconds before requesting another OTP.`);
   }
-  const code = generateCode();
+  const hourly = await db.query(
+    `SELECT COUNT(*) c FROM otp_verifications WHERE target=? AND purpose=? AND created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)`,
+    [email, purpose]
+  ).catch(() => [{ c: 0 }]);
+  if (Number(hourly[0]?.c || 0) >= Number(process.env.OTP_MAX_PER_HOUR || 8)) {
+    throw ApiError.tooMany('Too many verification codes requested. Please try again later.');
+  }
+  const code = (config.nodeEnv !== 'production' && process.env.OTP_DEV_FIXED_CODE) ? String(process.env.OTP_DEV_FIXED_CODE) : generateCode();
   const codeHash = hashCode(code);
   const appName = config.appName || 'ZenjiGO';
   const text = `${appName} verification code: ${code}. Valid for ${OTP_TTL_MINUTES} minutes. Do not share this code.`;
@@ -89,7 +104,10 @@ async function send({ target, purpose = 'login', channel }) {
   const { host, port, user, password, from } = config.smtp;
   if (!host || !user || !password || !from) {
     if (config.nodeEnv !== 'production' && process.env.OTP_ALLOW_CONSOLE === 'true') {
-      console.warn(`[OTP DEV CONSOLE] target=${email} purpose=${purpose} code=${code}`);
+      // Dev-only escape hatch (never active in production). The code is intentionally NOT logged;
+      // read it from the dev database row instead (otp_verifications.code_hash is a hash, so use
+      // OTP_DEV_FIXED_CODE for local testing).
+      console.warn(`[OTP DEV CONSOLE] target=${email} purpose=${purpose} (code not logged)`);
       messageId = `DEV-CONSOLE-${Date.now()}`;
     } else {
       throw ApiError.badRequest('Email delivery is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD and SMTP_FROM.');
@@ -133,14 +151,17 @@ async function verify({ target, code, purpose = 'login' }) {
   const maxAttempts = config.security.otpMaxAttempts || 5;
   if (Number(row.attempts) >= maxAttempts) {
     await db.query('UPDATE otp_verifications SET status="cancelled" WHERE id=?', [row.id]);
-    throw ApiError.badRequest('Too many invalid attempts. Request a new OTP.');
+    throw ApiError.tooMany('Too many invalid attempts. Request a new OTP.');
   }
   const incoming = hashCode(String(code || '').trim());
-  if (!row.code_hash || incoming !== row.code_hash) {
+  if (!safeEqualHex(incoming, row.code_hash)) {
     await db.query('UPDATE otp_verifications SET attempts = attempts + 1 WHERE id=?', [row.id]);
     throw ApiError.badRequest('Invalid OTP code. Check the code and try again.');
   }
-  await db.query('UPDATE otp_verifications SET status="verified", verified_at=UTC_TIMESTAMP() WHERE id=?', [row.id]);
+  // Atomic single-use consumption: only one concurrent request can flip pending -> verified.
+  const claimed = await db.query(
+    'UPDATE otp_verifications SET status="verified", verified_at=UTC_TIMESTAMP() WHERE id=? AND status="pending"', [row.id]);
+  if (!claimed.affectedRows) throw ApiError.badRequest('Invalid or expired OTP. Request a new one.');
   return true;
 }
 
@@ -158,7 +179,7 @@ async function check({ target, code, purpose = 'login' }) {
   const maxAttempts = config.security.otpMaxAttempts || 5;
   if (Number(row.attempts) >= maxAttempts) throw ApiError.badRequest('Too many invalid attempts. Request a new OTP.');
   const incoming = hashCode(String(code || '').trim());
-  if (!row.code_hash || incoming !== row.code_hash) {
+  if (!safeEqualHex(incoming, row.code_hash)) {
     await db.query('UPDATE otp_verifications SET attempts = attempts + 1 WHERE id=?', [row.id]);
     throw ApiError.badRequest('Invalid OTP code. Check the code and try again.');
   }

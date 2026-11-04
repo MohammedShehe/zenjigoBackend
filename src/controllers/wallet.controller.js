@@ -89,19 +89,3 @@ exports.topupCancel = asyncHandler(async (req, res) => {
   const done = await paymentService.cancelPendingTopup(req.user.sub, req.params.id);
   ok(res, { cancelled: done }, done ? 'Top-up cancelled' : 'Nothing to cancel');
 });
-
-exports.charge = asyncHandler(async (req, res) => {
-  ok(
-    res,
-    {
-      balance: await ride.chargeWallet(
-        req.user.sub,
-        Number(req.body.amount),
-        'adjustment',
-        null,
-        'Wallet debit'
-      )
-    },
-    'Wallet charged'
-  );
-});

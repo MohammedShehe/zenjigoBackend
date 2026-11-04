@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { body } = require('express-validator');
 const { validate } = require('../utils/validation');
 const c = require('../controllers/auth.controller');
-const { otpLimiter } = require('../middleware/rateLimit');
+const { otpLimiter, authLimiter } = require('../middleware/rateLimit');
 
 router.post('/rider/send-otp', otpLimiter, [
   body('phone').isString().notEmpty(),
@@ -13,7 +13,7 @@ router.post('/rider/send-otp', otpLimiter, [
   return c.sendOtp(req, res, next);
 });
 
-router.post('/rider/verify-otp', [
+router.post('/rider/verify-otp', authLimiter, [
   body('phone').notEmpty(), body('email').isEmail(),
   body('code').isLength({ min: 4, max: 8 }), body('fullName').optional().isLength({ max: 120 })
 ], validate, c.verifyRider);
@@ -32,18 +32,18 @@ router.post('/driver/send-email-otp', otpLimiter, [
   body('email').isEmail(), body('purpose').optional().isIn(['driver_registration'])
 ], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'driver_registration'; c.sendEmailOtp(req, res, next); });
 
-router.post('/driver/verify-otp', [
+router.post('/driver/verify-otp', authLimiter, [
   body('target').isEmail(), body('code').isLength({ min: 4, max: 8 }),
   body('purpose').optional().isIn(['login', 'driver_registration'])
 ], validate, (req, res, next) => { req.body.purpose = req.body.purpose || 'driver_registration'; c.verifyDriverOtp(req, res, next); });
 
-router.post('/driver/login', [
+router.post('/driver/login', authLimiter, [
   body('email').isEmail().withMessage('A valid email is required for driver sign-in'),
   body('code').isLength({ min: 4, max: 8 }).withMessage('A valid OTP code is required')
 ], validate, c.loginDriver);
 
-router.post('/admin/login', [body('email').isEmail(), body('password').isString().isLength({ min: 8 })], validate, c.adminLogin);
-router.post('/admin/verify-otp', [body('email').isEmail(), body('code').isLength({ min: 4, max: 8 })], validate, c.adminVerifyOtp);
+router.post('/admin/login', authLimiter, [body('email').isEmail(), body('password').isString().isLength({ min: 8 })], validate, c.adminLogin);
+router.post('/admin/verify-otp', authLimiter, [body('email').isEmail(), body('code').isLength({ min: 4, max: 8 })], validate, c.adminVerifyOtp);
 router.post('/refresh', [body('refreshToken').notEmpty()], validate, c.refresh);
 router.post('/logout', c.logout);
 

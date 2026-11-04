@@ -9,7 +9,7 @@ const cookieParser = require('cookie-parser');
 const config = require('./config/env');
 const { globalLimiter } = require('./middleware/rateLimit');
 const { auth, roles } = require('./middleware/auth');
-const { notFound, errorHandler } = require('./middleware/error');
+const { requestId, notFound, errorHandler } = require('./middleware/error');
 
 const app = express();
 
@@ -129,6 +129,7 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
+app.use(requestId);
 app.use(helmet());
 
 app.use(cors(corsOptions));
